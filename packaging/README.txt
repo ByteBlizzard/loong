@@ -43,7 +43,9 @@ loong help               完整用法        loong --version  版本
 --------
 缺省 = 当前工作目录：建个目录、cd 进去、敲 loong 即可，全部产物就地落盘——
 workspace.db（AST 持久化）、loongd.json（daemon 端点：端口/pid）、registry/
-（发布注册表）、cache/（依赖缓存）、daemon.log（daemon 日志）。
+（发布注册表）、cache/（依赖缓存）、daemon.log（daemon 日志）、build/
+（项目构建产物：<项目名>.jar 与 classes/ 中间产物，Web UI「构建」页或 agent 的
+build_project 工具触发）。
 用 --project <目录> 或环境变量 LOONG_PROJECT 覆盖。
 用户主目录只存 ~/.loong（跨项目个人配置与 daemon 运行索引，loong list 用）。
 

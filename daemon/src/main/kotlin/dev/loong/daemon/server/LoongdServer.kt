@@ -8,17 +8,27 @@ import dev.loong.engine.ast.FieldValue
 import dev.loong.engine.ast.Kind
 import dev.loong.engine.ast.NodeId
 import dev.loong.engine.ast.NodeTable
+import dev.loong.engine.diagnostics.Diagnostic
+import dev.loong.engine.diagnostics.Severity
 import dev.loong.engine.json.Json
+import dev.loong.engine.storage.LoongastCodec
 import dev.loong.engine.storage.WorkspaceSnapshot
 import dev.loong.engine.testrunner.TestRunner
 import dev.loong.engine.text.Renderer
 import dev.loong.engine.workspace.Workspace
+import java.io.File
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.jar.Attributes
+import java.util.jar.JarEntry
+import java.util.jar.JarOutputStream
+import java.util.jar.Manifest
+import java.util.zip.ZipFile
 
 /**
  * loongd：语言守护进程（design §8.1/§8.2）。
@@ -68,6 +78,8 @@ class LoongdServer(
         runCatching { storage.load() }.getOrNull()?.let {
             runCatching { workspace.restore(it.modules) }
         }
+        // 空项目初始化：恢复后仍无任何模块 → 装载缺省的 main 与 example
+        DefaultModules.seedIfEmpty(workspace)
         http.executor = Executors.newCachedThreadPool { r ->
             Thread(r, "loongd-http").apply { isDaemon = true }
         }
@@ -140,6 +152,30 @@ class LoongdServer(
                 method == "POST" && path == "/persist" -> mutate(ex) { _ ->
                     persist()
                     mapOf("ok" to true, "watermark" to workspace.watermark())
+                }
+
+                // 项目构建（design §7 打包）：产物落项目目录 build/（jar + class 中间产物）
+                method == "POST" && path == "/build" -> {
+                    try {
+                        val result = buildProject()
+                        respondJson(ex, 200, result)
+                        broadcast(Json.write(result + ("type" to "build")))
+                    } catch (e: BuildRefused) {
+                        respondJson(
+                            ex, 409,
+                            mapOf(
+                                "error" to "modules have errors; fix diagnostics before building",
+                                "modules" to e.modules.map { (name, diags) ->
+                                    mapOf(
+                                        "module" to name,
+                                        "errors" to diags.map {
+                                            mapOf("code" to it.code, "message" to it.message, "node" to it.nodeId.value)
+                                        },
+                                    )
+                                },
+                            ),
+                        )
+                    }
                 }
 
                 // 优雅停止（loong stop）：先把响应发回，再退出触发 shutdown hook 落盘关库。
@@ -221,6 +257,23 @@ class LoongdServer(
         // 模块名含 '/'（如 demo.daemon/v1）：路径中以 %2F 编码，仅解码首段
         val name = java.net.URLDecoder.decode(segments[0], Charsets.UTF_8)
         when {
+            // 整模块卸载（与 POST /modules 对称）：无请求体，走单写者队列并落盘
+            method == "DELETE" && segments.size == 1 -> {
+                val result = mutations.submit<Map<String, Any?>> {
+                    workspace.remove(name) ?: error("module '$name' is not loaded")
+                    noteMutation()
+                    mapOf("deleted" to name)
+                }.get()
+                broadcast(Json.write(result + mapOf("module" to name, "type" to "mutation")))
+                respondJson(ex, 200, result)
+            }
+
+            // 原始 AST：.loongast 规范导出（ADR-0002，与持久化字节一致）
+            method == "GET" && segments.size == 2 && segments[1] == "ast" -> {
+                val text = LoongastCodec.serialize(workspace.tableOf(name), workspace.rootOf(name))
+                respondText(ex, 200, text, "application/json")
+            }
+
             method == "GET" && segments.size == 2 && segments[1] == "nodes" -> {
                 val kind = ex.requestURI.rawQuery?.let { q ->
                     q.split('&').firstOrNull { it.startsWith("kind=") }?.removePrefix("kind=")
@@ -452,6 +505,133 @@ class LoongdServer(
         }
     }
 
+    // ---------- 项目构建（design §7 打包形态；产物落项目目录） ----------
+
+    /** 构建门禁失败：模块 → Error 诊断列表（路由层转 409 + 明细，与 run_tests 同风格）。 */
+    private class BuildRefused(val modules: List<Pair<String, List<Diagnostic>>>) :
+        RuntimeException("modules have errors")
+
+    /**
+     * 全项目构建：工作区各模块字节码 + runtime shim 打成自包含可运行 jar。
+     * 中间产物 `<项目目录>/build/classes/`，jar `<项目目录>/build/<项目名>.jar`。
+     */
+    private fun buildProject(): Map<String, Any?> {
+        val projectDir = dbRoot.parent
+        val names = workspace.moduleNames()
+
+        val broken = names.map { it to workspace.module(it).diagnostics.filter { d -> d.severity == Severity.Error } }
+            .filter { it.second.isNotEmpty() }
+        if (broken.isNotEmpty()) throw BuildRefused(broken)
+
+        val buildDir = projectDir.resolve("build")
+        val classesDir = buildDir.resolve("classes")
+        var classCount = 0
+        for (n in names) {
+            workspace.module(n).classes.forEach { (internal, bytes) ->
+                val f = classesDir.resolve("$internal.class")
+                Files.createDirectories(f.parent)
+                Files.write(f, bytes)
+                classCount++
+            }
+        }
+
+        // Main-Class：短名 main 的模块优先，否则首个有 main 函数的模块
+        val mainModule = names.firstOrNull { it.substringBefore('/') == "main" }
+            ?: names.firstOrNull(::hasMainFunction)
+        val mainClass = mainModule?.let { workspace.module(it).hostClassName }
+
+        val runtime = runtimeShimClasses()
+        val jarName = projectDir.fileName?.toString()
+            ?.replace(Regex("[^A-Za-z0-9._-]"), "_")?.takeIf { it.isNotBlank() } ?: "loong-app"
+        val jar = buildDir.resolve("$jarName.jar")
+        Files.createDirectories(buildDir)
+        val manifest = Manifest().apply {
+            mainAttributes[Attributes.Name.MANIFEST_VERSION] = "1.0"
+            if (mainClass != null) mainAttributes[Attributes.Name.MAIN_CLASS] = mainClass
+        }
+        JarOutputStream(Files.newOutputStream(jar), manifest).use { jos ->
+            fun put(internal: String, bytes: ByteArray) {
+                jos.putNextEntry(JarEntry("$internal.class"))
+                jos.write(bytes)
+                jos.closeEntry()
+            }
+
+            for (n in names) workspace.module(n).classes.forEach { (internal, bytes) -> put(internal, bytes) }
+            runtime.forEach { (internal, bytes) -> put(internal, bytes) }
+        }
+        return mapOf(
+            "jar" to jar.toString(),
+            "mainClass" to mainClass,
+            "classes" to classCount,
+            "runtimeClasses" to runtime.size,
+            "modules" to names,
+        )
+    }
+
+    /** 模块是否声明了模块级 main 函数（codegen 会为它生成 JVM 入口桥）。 */
+    private fun hasMainFunction(name: String): Boolean {
+        val t = workspace.tableOf(name)
+        return t[workspace.rootOf(name)].kids.any {
+            t[it].kind == Kind.Function && (t[it].fields["name"] as? FieldValue.Str)?.value == "main"
+        }
+    }
+
+    /**
+     * runtime shim：classpath 上 dev/loong/runtime 包的全部类字节。shim 是纯 Java
+     * 实现（零第三方依赖，仅 JDK），打进构建 jar 后 `java -jar` 即可自包含运行——
+     * 不携带任何宿主工具链（如 kotlin-stdlib）的运行时类。
+     */
+    private fun runtimeShimClasses(): Map<String, ByteArray> = classpathClassesUnder(RUNTIME_PACKAGE)
+
+    /**
+     * 收集 classpath 上位于给定包前缀下的全部类字节。
+     * 扫描 java.class.path 各 entry（目录 walk / jar 枚举），并叠加 runtime 类自身
+     * codeSource 兜底（Gradle 测试 worker 可能经 pathing jar 装载，class.path 不可靠）。
+     */
+    private fun classpathClassesUnder(vararg prefixes: String): Map<String, ByteArray> {
+        val out = LinkedHashMap<String, ByteArray>()
+        val seen = HashSet<String>()
+        val roots = ArrayList<Path>()
+        System.getProperty("java.class.path")?.split(File.pathSeparator)?.forEach {
+            if (it.isNotBlank()) roots.add(Path.of(it))
+        }
+        for (cn in listOf("dev.loong.runtime.Console", "dev.loong.runtime.Variant")) {
+            runCatching {
+                Class.forName(cn).protectionDomain.codeSource?.location?.let { roots.add(Path.of(it.toURI())) }
+            }
+        }
+        for (root in roots.distinct()) {
+            when {
+                Files.isDirectory(root) -> {
+                    val pkgs = prefixes.map { root.resolve(it) }.filter { Files.isDirectory(it) }
+                    if (pkgs.isEmpty()) continue
+                    for (pkg in pkgs) {
+                        Files.walk(pkg).use { stream ->
+                            stream.filter { it.toString().endsWith(".class") }.forEach { f ->
+                                val internal = root.relativize(f).toString().replace('\\', '/').removeSuffix(".class")
+                                if (seen.add(internal)) out[internal] = Files.readAllBytes(f)
+                            }
+                        }
+                    }
+                }
+
+                Files.isRegularFile(root) && root.fileName.toString().endsWith(".jar") ->
+                    runCatching { ZipFile(root.toFile()) }.getOrNull()?.use { zip ->
+                        zip.entries().asSequence()
+                            .filter { e ->
+                                !e.isDirectory && e.name.endsWith(".class") &&
+                                    prefixes.any { e.name.startsWith(it) }
+                            }
+                            .forEach { e ->
+                                val internal = e.name.removeSuffix(".class")
+                                if (seen.add(internal)) out[internal] = zip.getInputStream(e).readBytes()
+                            }
+                    }
+            }
+        }
+        return out
+    }
+
     // ---------- 序列化辅助 ----------
 
     private fun diagnosticsJson(diags: List<dev.loong.engine.diagnostics.Diagnostic>) =
@@ -519,9 +699,9 @@ class LoongdServer(
         ex.responseBody.use { it.write(bytes) }
     }
 
-    private fun respondText(ex: HttpExchange, status: Int, text: String) {
+    private fun respondText(ex: HttpExchange, status: Int, text: String, mime: String = "text/plain") {
         val bytes = text.toByteArray(StandardCharsets.UTF_8)
-        ex.responseHeaders.add("Content-Type", "text/plain; charset=utf-8")
+        ex.responseHeaders.add("Content-Type", "$mime; charset=utf-8")
         ex.sendResponseHeaders(status, bytes.size.toLong())
         ex.responseBody.use { it.write(bytes) }
     }
@@ -533,5 +713,6 @@ class LoongdServer(
 
     companion object {
         private const val PERSIST_EVERY = 10
+        private const val RUNTIME_PACKAGE = "dev/loong/runtime/"
     }
 }

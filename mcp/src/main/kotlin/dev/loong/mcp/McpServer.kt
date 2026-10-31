@@ -17,8 +17,10 @@ import kotlin.system.exitProcess
  * 瘦客户端——全部状态经 loongd 的 HTTP API 读写，本进程不留状态；
  * stdio 传输（换行分隔的 JSON-RPC 2.0，MCP 规范）。
  *
- * 全部工具已实现（版本历史与发布均接线），
- * 与 plan.md 的 M4/M7 排期一致。
+ * 除工具面外提供语言导览面（见 GuideContent）：initialize 的 instructions（常驻精简版）、
+ * prompts（write-function / new-module / fix-diagnostics 任务手册）、
+ * resources（文法 / AST 节点表 / 诊断码 / 示例参考文档）——教 agent 写 loong，
+ * 而不只是看到工具列表。工具本身携带 inputSchema 与用法要点描述。
  */
 object McpServer {
 
@@ -93,12 +95,57 @@ class McpSession(
             "initialize" -> Ok(
                 mapOf(
                     "protocolVersion" to "2024-11-05",
-                    "capabilities" to mapOf("tools" to emptyMap<String, Any?>()),
+                    "capabilities" to mapOf(
+                        "tools" to emptyMap<String, Any?>(),
+                        "prompts" to mapOf("listChanged" to false),
+                        "resources" to mapOf("listChanged" to false),
+                    ),
                     "serverInfo" to mapOf("name" to "loong-mcp", "version" to McpServer.VERSION),
+                    // 语言与工作法导览：客户端会把 instructions 注入模型上下文（MCP 规范）；
+                    // 完整参考走 prompts（任务手册）与 resources（文法/节点表/诊断码）按需拉取。
+                    "instructions" to GuideContent.INSTRUCTIONS,
                 ),
             )
 
             "ping" -> Ok(emptyMap<String, Any?>())
+
+            // ---------- 语言导览面（prompts / resources） ----------
+
+            "prompts/list" -> Ok(mapOf("prompts" to GuideContent.PROMPTS.map { it.descriptor }))
+
+            "prompts/get" -> {
+                val name = (params?.map?.get("name") as? Json.Str)?.v
+                    ?: return Err(-32602, "missing prompt name")
+                val prompt = GuideContent.PROMPTS.firstOrNull { it.name == name }
+                    ?: return Err(-32602, "unknown prompt '$name'")
+                val args = (params.map["arguments"] as? Json.Obj)?.map
+                    ?.mapValues { (_, v) -> (v as? Json.Str)?.v ?: v.toString() }
+                    ?: emptyMap()
+                Ok(
+                    mapOf(
+                        "description" to prompt.description,
+                        "messages" to listOf(
+                            mapOf("role" to "user", "content" to mapOf("type" to "text", "text" to prompt.render(args))),
+                        ),
+                    ),
+                )
+            }
+
+            "resources/list" -> Ok(mapOf("resources" to GuideContent.RESOURCES.map { it.descriptor }))
+
+            "resources/read" -> {
+                val uri = (params?.map?.get("uri") as? Json.Str)?.v
+                    ?: return Err(-32602, "missing resource uri")
+                val res = GuideContent.RESOURCES.firstOrNull { it.uri == uri }
+                    ?: return Err(-32602, "unknown resource '$uri'")
+                Ok(
+                    mapOf(
+                        "contents" to listOf(
+                            mapOf("uri" to uri, "mimeType" to "text/markdown", "text" to res.text),
+                        ),
+                    ),
+                )
+            }
 
             "tools/list" -> Ok(mapOf("tools" to TOOLS.map { it.descriptor }))
 
@@ -145,6 +192,13 @@ class McpSession(
             HttpResponse.BodyHandlers.ofString(),
         ).let { if (it.statusCode() >= 400) error(it.body()) else it.body() }
 
+    private fun delete(path: String): String =
+        http.send(
+            HttpRequest.newBuilder(URI(baseUrl + path))
+                .header("X-Loong-Client", "mcp").DELETE().build(),
+            HttpResponse.BodyHandlers.ofString(),
+        ).let { if (it.statusCode() >= 400) error(it.body()) else it.body() }
+
     private fun argString(args: Json.Obj, key: String): String? =
         (args.map[key] as? Json.Str)?.v
 
@@ -156,42 +210,177 @@ class McpSession(
 
     // ---------- 工具面（design §8.3） ----------
 
-    private class Tool(val name: String, val description: String, val handler: (Json.Obj) -> String) {
+    /** JSON Schema 片段（properties + required）：随工具描述教 agent 正确调用。 */
+    private fun prop(name: String, type: String, desc: String): Pair<String, Any?> =
+        name to mapOf("type" to type, "description" to desc)
+
+    private fun schema(vararg props: Pair<String, Any?>, required: List<String> = emptyList()): Map<String, Any?> =
+        buildMap {
+            put("properties", props.toMap())
+            if (required.isNotEmpty()) put("required", required)
+        }
+
+    private class Tool(
+        val name: String,
+        val description: String,
+        val schema: Map<String, Any?> = emptyMap(),
+        val handler: (Json.Obj) -> String,
+    ) {
         val descriptor: Map<String, Any?> = mapOf(
             "name" to name,
             "description" to description,
-            "inputSchema" to mapOf("type" to "object", "properties" to emptyMap<String, Any?>()),
+            "inputSchema" to mapOf("type" to "object") + schema,
         )
     }
 
     private val TOOLS: List<Tool> = listOf(
-        Tool("get_diagnostics", "模块当前诊断（码/消息/节点）") { a ->
+        // ---------- 模块级管理（整模块装卸） ----------
+        Tool(
+            "list_modules",
+            "列出工作区全部模块名。新建模块前先看一眼，避免与既有模块重名。",
+        ) { _ ->
+            get("/modules")
+        },
+        Tool(
+            "create_module",
+            "以完整 loong 源码文本创建（或整体替换同名）模块——新模块的唯一入口，" +
+                "返回模块名与装载诊断；之后用 insert_node 等工具增量修改。" +
+                "源码须以 module <全名> 声明开头；最小脚手架与命名规范见 prompt new-module。" +
+                "注意：新项目已预置 main 与 example 模块，多数任务直接在其上加声明即可。",
+            schema(
+                prop("source", "string", "完整模块源码文本（渲染视图同构形态）"),
+                required = listOf("source"),
+            ),
+        ) { a ->
+            post("/modules", Json.write(mapOf("source" to (argString(a, "source") ?: error("source required")))))
+        },
+        Tool(
+            "delete_module",
+            "删除整个模块（AST 与持久化一并移除，不可恢复）。删除前确认已 commit 或确实不再需要。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a ->
+            delete("/modules/${enc(req(a))}")
+        },
+        Tool(
+            "get_diagnostics",
+            "模块当前诊断列表（code/message/node）。写操作响应也自带诊断，本工具用于主动复查。",
+            schema(prop("module", "string", "模块全名，如 demo.app/v1"), required = listOf("module")),
+        ) { a ->
             get("/modules/${enc(req(a))}/diagnostics")
         },
-        Tool("get_node", "按节点 ID 读取 AST 节点") { a ->
+        Tool(
+            "get_node",
+            "按节点 ID 读 AST 节点（kind/fields/kids/parent）。节点形态见 resource loong://reference/ast-kinds。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "节点 ID（Module 根恒为 1）"),
+                required = listOf("module", "id"),
+            ),
+        ) { a ->
             get("/modules/${enc(req(a))}/node/${argLong(a, "id") ?: error("id required")}")
         },
-        Tool("find_nodes", "列出节点（可按 kind 过滤），返回 ID 列表") { a ->
+        Tool(
+            "find_nodes",
+            "列出节点 ID（可按 kind 过滤，如 Function/Test/DocComment）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("kind", "string", "可选：Kind 名，缺省列出全部"),
+                required = listOf("module"),
+            ),
+        ) { a ->
             val kind = argString(a, "kind")?.let { "?kind=$it" } ?: ""
             get("/modules/${enc(req(a))}/nodes$kind")
         },
-        Tool("get_module_interface", "模块文本视图（渲染的 AST）") { a ->
+        Tool(
+            "get_module_interface",
+            "模块的渲染文本视图（AST → loong 源码形态）。改代码前先读它定位结构与插入位置。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a ->
             get("/modules/${enc(req(a))}/render")
         },
-        Tool("get_dependencies", "模块 depends 声明") { a ->
+        Tool(
+            "get_dependencies",
+            "模块的 depends 声明列表。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a ->
             get("/modules/${enc(req(a))}/deps")
         },
-        Tool("insert_node", "插入节点：{module,parent,index,kind,fields}") { a -> edit(withOp(a, "insert")) },
-        Tool("replace_node", "替换节点字段/子节点：{module,id,fields?,kids?}") { a -> edit(withOp(a, "replace")) },
-        Tool("move_node", "移动节点：{module,id,newParent,index}") { a -> edit(withOp(a, "move")) },
-        Tool("delete_node", "删除节点（整棵子树）：{module,id}") { a -> edit(withOp(a, "delete")) },
-        Tool("check", "触发检查并返回诊断（写操作已自动触发，此为显式入口）") { a ->
+        Tool(
+            "insert_node",
+            "创建节点并挂接为 parent 第 index 个子节点，返回新节点 ID。响应自带重算诊断。" +
+                "注意：DocComment 必须是声明的第一个子节点（index 0）；" +
+                "fields 形态见 resource loong://reference/ast-kinds。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("parent", "integer", "父节点 ID（模块级声明挂 Module 根 = 1）"),
+                prop("index", "integer", "插入位置（0 起）"),
+                prop("kind", "string", "节点 kind，如 Function/DocComment/Param/Block/Test"),
+                prop("fields", "object", "节点字段，如 {\"name\":\"f\",\"visibility\":\"public\",\"return_type\":\"Int\"}"),
+                required = listOf("module", "parent", "kind"),
+            ),
+        ) { a -> edit(withOp(a, "insert")) },
+        Tool(
+            "replace_node",
+            "原地改节点字段；给 kids 则整组子节点替换（旧子树删除）。响应自带重算诊断。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "目标节点 ID"),
+                prop("fields", "object", "新字段（可只给要改的键）"),
+                prop("kids", "array", "新子节点 ID 列表（须为游离节点；不给则保留子树）"),
+                required = listOf("module", "id"),
+            ),
+        ) { a -> edit(withOp(a, "replace")) },
+        Tool(
+            "move_node",
+            "把节点连同子树移到 newParent 的 index 位置（禁止移入自身子树）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "节点 ID"),
+                prop("newParent", "integer", "新父节点 ID"),
+                prop("index", "integer", "新位置（0 起）"),
+                required = listOf("module", "id", "newParent"),
+            ),
+        ) { a -> edit(withOp(a, "move")) },
+        Tool(
+            "delete_node",
+            "删除节点及整棵子树（ID 永不复用）。响应自带重算诊断。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "待删节点 ID"),
+                required = listOf("module", "id"),
+            ),
+        ) { a -> edit(withOp(a, "delete")) },
+        Tool(
+            "check",
+            "显式触发检查并返回诊断（写操作已自动触发重算，此为复查入口，同 get_diagnostics）。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a ->
             get("/modules/${enc(req(a))}/diagnostics")
         },
-        Tool("run_tests", "运行模块全部测试，结果按 Test 节点 ID 索引") { a ->
+        Tool(
+            "run_tests",
+            "运行模块全部内联 test，结果按 Test 节点 ID 索引。诊断清零后才可运行。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a ->
             post("/modules/${enc(req(a))}/test", "{}")
         },
-        Tool("add_dependency", "添加依赖声明：{module,name}") { a ->
+        Tool(
+            "build_project",
+            "构建整个项目为自包含可运行 jar（要求全部模块诊断清零）。" +
+                "产物落项目目录 build/：build/<项目名>.jar 与 build/classes/（class 中间产物）；" +
+                "返回 jar 路径与 Main-Class。与人类在 Web UI「构建」页触发的是同一构建。",
+        ) { _ ->
+            post("/build", "{}")
+        },
+        Tool(
+            "add_dependency",
+            "添加 depends 声明（registry 源）。跨模块引用前先加依赖，否则 E_UNKNOWN_NAME。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("name", "string", "依赖模块全名，如 org.example.core/v1"),
+                required = listOf("module", "name"),
+            ),
+        ) { a ->
             edit(
                 Json.Obj(
                     linkedMapOf(
@@ -210,7 +399,15 @@ class McpSession(
                 ),
             )
         },
-        Tool("remove_dependency", "删除依赖声明：{module,name}") { a ->
+        Tool(
+            "remove_dependency",
+            "删除 depends 声明（按依赖模块名）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("name", "string", "依赖模块全名"),
+                required = listOf("module", "name"),
+            ),
+        ) { a ->
             val m = req(a)
             val deps = Json.parse(get("/modules/${enc(m)}/deps")) as Json.Obj
             val target = (deps.map["dependencies"] as Json.Arr).items
@@ -228,7 +425,14 @@ class McpSession(
         },
         Tool(
             "request_human_review",
-            "挂起请求人工审批；人类经 daemon 响应后本调用返回结果。{module,reason,nodeIds?}",
+            "挂起请求人工审批；人类经 daemon（Web UI）响应后本调用返回结果。" +
+                "用于 commit 前把关或高风险变更（接口/依赖改动）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("reason", "string", "请求审批的原因（展示给人类）"),
+                prop("nodeIds", "array", "涉及的节点 ID 列表（可选）"),
+                required = listOf("module", "reason"),
+            ),
         ) { a ->
             val body = Json.write(
                 mapOf(
@@ -251,23 +455,59 @@ class McpSession(
             }
             "review $id: still pending (timed out waiting)"
         },
-        Tool("commit", "提交当前模块快照：{module, message?}") { a ->
+        Tool(
+            "commit",
+            "提交当前模块快照到版本历史（不可变）。测试全绿后再提交。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("message", "string", "提交说明（可选）"),
+                required = listOf("module"),
+            ),
+        ) { a ->
             post(
                 "/modules/${enc(req(a))}/commit",
                 Json.write(mapOf("message" to (argString(a, "message") ?: ""))),
             )
         },
-        Tool("log", "提交历史：{module}") { a -> get("/modules/${enc(req(a))}/log") },
-        Tool("diff", "两次提交间的行级 diff：{module, id}") { a ->
+        Tool(
+            "log",
+            "模块提交历史（id + message）。",
+            schema(prop("module", "string", "模块全名"), required = listOf("module")),
+        ) { a -> get("/modules/${enc(req(a))}/log") },
+        Tool(
+            "diff",
+            "某次提交相对其前一提交的行级 diff。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "提交 ID（log 里查询）"),
+                required = listOf("module", "id"),
+            ),
+        ) { a ->
             get("/modules/${enc(req(a))}/diff/${argLong(a, "id") ?: error("id required")}")
         },
-        Tool("checkout", "检出历史提交：{module, id}") { a ->
+        Tool(
+            "checkout",
+            "检出历史提交（模块回到该快照，用于回滚）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("id", "integer", "提交 ID"),
+                required = listOf("module", "id"),
+            ),
+        ) { a ->
             post(
                 "/modules/${enc(req(a))}/checkout",
                 Json.write(mapOf("id" to (argLong(a, "id") ?: error("id required")))),
             )
         },
-        Tool("publish", "发布模块到本地注册表：{module, version}") { a ->
+        Tool(
+            "publish",
+            "发布模块到本地注册表（要求诊断清零；版本须匹配主版本段，如模块 a.b/v2 配 2.y.z）。",
+            schema(
+                prop("module", "string", "模块全名"),
+                prop("version", "string", "语义版本 x.y.z"),
+                required = listOf("module", "version"),
+            ),
+        ) { a ->
             post(
                 "/modules/${enc(req(a))}/publish",
                 Json.write(mapOf("version" to (argString(a, "version") ?: error("version required")))),

@@ -34,7 +34,10 @@ gradlew.bat build      # Windows cmd / PowerShell
 包根目录只有一对脚本 `loong`（sh）/ `loong.cmd`；全部 jar 合并为唯一的 `loong.jar`。
 
 单一命令 + 子命令（ADR-0006）：`loong`（= `loong up`）ensure daemon、`loong stop`、
-`loong mcp`（agent 侧 stdio 桥）、`loong list`（本机 daemon 概览）、
+`loong mcp`（agent 侧 stdio 桥，随握手下发语言导览 instructions，
+并提供 write-function / new-module / fix-diagnostics 任务手册 prompts 与
+文法 / AST 节点表 / 诊断码 / 示例 resources——教 agent 写 loong，而非只给工具清单）、
+`loong list`（本机 daemon 概览）、
 `loong check/build/run/test`（编译器）。项目目录缺省 = 当前工作目录——
 建个目录、cd 进去、敲 loong 即可，产物就地落盘；每个项目一个常驻 daemon，
 端口随机分配互不冲突，用户与 agent 谁先启动都成立，同项目可挂多个 agent。

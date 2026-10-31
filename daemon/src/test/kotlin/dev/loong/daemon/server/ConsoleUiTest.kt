@@ -27,7 +27,7 @@ class ConsoleUiTest {
             assertEquals("text/html", page.headers().firstValue("Content-Type").get().substringBefore(';'))
             // 四个面板 + SSE + 审批操作的存在性
             assertTrue("Loong Console" in page.body())
-            for (marker in listOf("/render", "/diagnostics", "/test", "/deps", "/events", "/review/")) {
+            for (marker in listOf("/render", "/ast", "/build", "/diagnostics", "/test", "/deps", "/events", "/review/")) {
                 assertTrue(marker in page.body(), "missing wiring for $marker")
             }
 

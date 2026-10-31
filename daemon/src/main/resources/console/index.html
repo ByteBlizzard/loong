@@ -37,6 +37,7 @@
     <button data-t="home" class="on">首页</button>
     <button data-t="mcp">MCP</button>
     <button data-t="code">代码</button>
+    <button data-t="build">构建</button>
     <button data-t="diag">诊断池</button>
     <button data-t="tests">测试</button>
     <button data-t="deps">依赖</button>
@@ -74,11 +75,13 @@ loong check &lt;file&gt;       编译检查；build &lt;file&gt; [-d &lt;dir&gt;
 loong help               完整帮助        loong --version  查看版本
 
 项目目录：缺省 = 当前工作目录，--project &lt;目录&gt; 或环境变量 LOONG_PROJECT 覆盖；
-产物就地落盘：workspace.db、loongd.json（端点）、registry/、cache/、daemon.log。
+产物就地落盘：workspace.db（AST 持久化）、loongd.json（端点）、registry/、cache/、daemon.log、
+build/（构建 jar 与 class 中间产物，见「构建」页）。
 每个项目一个常驻 daemon，端口随机分配互不冲突；Web UI 地址以启动输出为准（即本页）。</pre>
 
       <b style="display:block;margin-top:16px">本页各页签</b>
-      <div class="ev">代码 — AST 渲染文本 + 实时诊断　|　诊断池 — 全量诊断列表</div>
+      <div class="ev">代码 — AST 渲染文本 / 原始 AST（.loongast JSON）切换 + 实时诊断　|　构建 — 打包项目为可运行 JAR</div>
+      <div class="ev">诊断池 — 全量诊断列表</div>
       <div class="ev">测试 — 运行与结果（按 Test 节点 ID 索引）　|　依赖 — depends 声明</div>
       <div class="ev">AI 活动流 — SSE 实时事件（变更/审批请求）　|　MCP — agent 接入指南与连接状态</div>
     </div>
@@ -104,8 +107,10 @@ loong help               完整帮助        loong --version  查看版本
       <span id="mcp-copied" class="muted" style="margin-left:10px"></span>
 
       <b style="display:block;margin-top:16px">agent 可用的工具面</b>
+      <div class="ev">模块：list_modules / create_module / delete_module（整模块装卸，源文本经 create_module 装载）</div>
       <div class="ev">读：get_diagnostics / get_node / find_nodes / get_module_interface / get_dependencies</div>
       <div class="ev">写（自动触发增量编译，诊断随响应返回）：insert_node / replace_node / move_node / delete_node</div>
+      <div class="ev">构建：build_project（全项目打成可运行 jar，落项目目录 build/）</div>
       <div class="ev">检查与测试：check / run_tests　|　依赖：add_dependency / remove_dependency</div>
       <div class="ev">版本：commit / log / diff / checkout　|　发布：publish（版本号 x.y.z）</div>
       <div class="ev">协作：request_human_review（挂起等待人类在本页批准）</div>
@@ -119,8 +124,24 @@ loong help               完整帮助        loong --version  查看版本
   </section>
 
   <section id="p-code" class="row" style="display:none;margin-top:12px">
-    <div class="col" style="flex:2"><b>代码视图（AST 渲染）</b><pre id="code" style="margin-top:8px">—</pre></div>
+    <div class="col" style="flex:2"><b>代码视图</b>
+      <span style="margin-left:10px">
+        <button id="v-render" class="act" style="padding:2px 10px" onclick="setView('render')">渲染文本</button>
+        <button id="v-ast" class="gray" style="padding:2px 10px" onclick="setView('ast')">原始 AST</button>
+        <button id="ast-copy" class="gray" style="padding:2px 10px;display:none" onclick="copyAst()">复制 AST</button>
+      </span>
+      <pre id="code" style="margin-top:8px">—</pre></div>
     <div class="col"><b>诊断</b><div id="code-diag" style="margin-top:8px">—</div></div>
+  </section>
+
+  <section id="p-build" class="row" style="display:none;margin-top:12px">
+    <div class="col" style="flex:2"><b>构建项目</b>
+      <button class="act" style="margin-left:10px" onclick="buildProject()">构建并输出 JAR</button>
+      <div id="build" style="margin-top:8px">—</div>
+      <p class="muted" style="margin-top:12px">要求全部模块诊断清零。产物落在本项目目录的 build/ 下：
+      <code>&lt;项目&gt;/build/&lt;项目名&gt;.jar</code>（自包含，含 runtime，可直接 <code>java -jar</code> 运行）
+      与 <code>&lt;项目&gt;/build/classes/</code>（class 中间产物）。agent 也可经 MCP 的 build_project 工具触发同一构建。</p></div>
+    <div class="col"><b>构建产物</b><div id="build-out" style="margin-top:8px">尚未构建</div></div>
   </section>
 
   <section id="p-diag" class="row" style="display:none;margin-top:12px">
@@ -156,6 +177,7 @@ loong help               完整帮助        loong --version  查看版本
 const $ = s => document.querySelector(s);
 const enc = m => encodeURIComponent(m);
 let current = null, pendingReview = null;
+let view = 'render', renderText = '', astText = '';
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -177,11 +199,14 @@ async function refreshModules() {
 
 async function refreshAll() {
   if (!current) return;
-  const [code, diag] = await Promise.all([
+  const [code, ast, diag] = await Promise.all([
     api('/modules/' + enc(current) + '/render'),
+    api('/modules/' + enc(current) + '/ast'),
     api('/modules/' + enc(current) + '/diagnostics'),
   ]);
-  $('#code').textContent = code;
+  renderText = code;
+  try { astText = JSON.stringify(JSON.parse(ast), null, 2); } catch { astText = ast; }
+  renderView();
   $('#rev').textContent = 'rev ' + diag.revision;
   renderDiag($('#code-diag'), diag.diagnostics || []);
   // 诊断池：当前模块（多模块时聚合）
@@ -189,6 +214,46 @@ async function refreshAll() {
   const deps = await api('/modules/' + enc(current) + '/deps');
   $('#deps').innerHTML = (deps.dependencies || []).map(d =>
     `<div class="ev">${d.module}${d.constraint ? ' ' + d.constraint : ''}</div>`).join('') || '<span class="muted">无</span>';
+}
+
+// 代码页视图切换：渲染文本 ↔ 原始 AST（.loongast 规范 JSON，与持久化字节一致）
+function renderView() {
+  $('#code').textContent = view === 'ast' ? (astText || '—') : (renderText || '—');
+}
+
+function setView(v) {
+  view = v;
+  $('#v-render').className = v === 'render' ? 'act' : 'gray';
+  $('#v-ast').className = v === 'ast' ? 'act' : 'gray';
+  $('#ast-copy').style.display = v === 'ast' ? '' : 'none';
+  renderView();
+}
+
+function copyAst() {
+  navigator.clipboard.writeText(astText).then(() => {
+    $('#ast-copy').textContent = '已复制';
+    setTimeout(() => { $('#ast-copy').textContent = '复制 AST'; }, 2000);
+  });
+}
+
+async function buildProject() {
+  $('#build').textContent = '构建中…';
+  const r = await api('/build', { method: 'POST', body: '{}' });
+  if (r.error) {
+    $('#build').innerHTML = '<span class="pill err">构建被拒绝</span>' +
+      (r.modules || []).map(m => `<div class="ev">${m.module}：` +
+        (m.errors || []).map(e =>
+          `<span style="color:var(--err);font-family:Consolas,monospace">${e.code}</span> ${e.message}`).join('；') +
+        '</div>').join('');
+    $('#build-out').innerHTML = '<span class="muted">尚未构建（先清零诊断）</span>';
+    return;
+  }
+  $('#build').innerHTML = `<span class="pill ok">构建成功</span> ` +
+    `<span class="muted">${r.classes} 个模块类 + ${r.runtimeClasses} 个 runtime 类</span>`;
+  $('#build-out').innerHTML =
+    `<div class="ev">JAR：${r.jar}</div>` +
+    (r.mainClass ? `<div class="ev">Main-Class：${r.mainClass}</div>` : '') +
+    `<div class="ev">模块：${(r.modules || []).join('、')}</div>`;
 }
 
 function renderDiag(el, list) {
@@ -259,7 +324,7 @@ async function quick(id, approved) {
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['home','mcp','code','diag','tests','deps','stream'].forEach(t =>
+  ['home','mcp','code','build','diag','tests','deps','stream'].forEach(t =>
     $('#p-' + t).style.display = t === b.dataset.t ? 'flex' : 'none');
   if (b.dataset.t === 'stream') refreshReviews();
   if (b.dataset.t === 'mcp') refreshMcpStatus();

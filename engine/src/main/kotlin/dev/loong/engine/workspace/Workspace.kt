@@ -79,6 +79,9 @@ class Workspace {
 
     fun rootOf(name: String): NodeId = module(name).root
 
+    /** 移除模块（整模块卸载）；不存在返回 null。 */
+    fun remove(name: String): ModuleState? = modules.remove(name)
+
     /** 全量装载（新建或整体替换一个模块）。 */
     fun load(source: String): ModuleState {
         val parsed = Parser(source).parse()
