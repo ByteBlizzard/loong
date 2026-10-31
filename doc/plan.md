@@ -105,7 +105,7 @@ loong.core 狗粮数据；其余待决事项全部归零。
   验证：展开目录与 zip 解压到任意目录均可直接使用（loongc run/test/build 冒烟、
   全栈 /health + Web UI + MCP、cmd/sh 双路径、退出码）。
 
-**构建环境**：JDK 21+（开发机 JDK 25）、Gradle 9.5.1，详见 README。测试：`gradle test`
+**构建环境**：JDK 21+、Gradle 9.5.1（经 wrapper 使用），详见 README。测试：`gradle test`
 （含 conformance 子进程运行、差分门禁）；发布：`gradle dist`。仓库
 github.com/ByteBlizzard/loong，main 分支。
 

@@ -16,20 +16,17 @@
 
 ## 构建
 
-要求 JDK 21+（本机使用 `C:\prog\jdk25`），Gradle 9.5.1（本机 `C:\prog\gradle-9.5.1-all`）。
+要求 JDK 21+；Gradle 9.5.1 经仓库自带的 wrapper 使用（首次运行自动下载发行版，无需单独安装）。
 
 ```bash
-# Git Bash
-JAVA_HOME=/c/prog/jdk25 /c/prog/gradle-9.5.1-all/bin/gradle build
-
-# 或使用 wrapper（首次会下载发行版）
-./gradlew build
+./gradlew build        # Linux / macOS / Git Bash
+gradlew.bat build      # Windows cmd / PowerShell
 ```
 
 ## 发布包
 
 ```bash
-gradle dist
+./gradlew dist
 ```
 
 一次产出两份：展开发布目录 `build/dist/loong/`（进入即可直接使用）与
