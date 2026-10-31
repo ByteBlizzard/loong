@@ -1,0 +1,7 @@
+# 发布脚本换行符钉死：shell 脚本一律 LF（进 zip/Unix 不坏），批处理一律 CRLF。
+packaging/loong    text eol=lf
+packaging/*.cmd    text eol=crlf
+packaging/README.txt text
+# 构建脚本自身也钉住，避免 autocrlf 反复翻转
+*.gradle.kts       text
+gradlew            text eol=lf

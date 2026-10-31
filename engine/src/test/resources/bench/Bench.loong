@@ -1,0 +1,73 @@
+module demo.bench
+
+external java "java.lang.System" {
+    static function nanoTime() -> Int
+}
+
+/// Timed arithmetic loop.
+function arith(n: Int) -> Int {
+    var x: Int = 0
+    var i: Int = 0
+    while i < n {
+        x = x + i % 7
+        i = i + 1
+    }
+    return x
+}
+
+/// Timed boxing array sum (Object[]).
+function arrSum(xs: Array<Int>, n: Int) -> Int {
+    var s: Int = 0
+    var i: Int = 0
+    while i < n {
+        s = s + xs[i]
+        i = i + 1
+    }
+    return s
+}
+
+/// Colors for match dispatch.
+public enum Color { Red Green Blue }
+
+/// Timed enum match (Variant tag lookupswitch).
+function matchLoop(n: Int) -> Int {
+    var s: Int = 0
+    var i: Int = 0
+    while i < n {
+        let c: Color = Color.Green
+        let r: Int = match c {
+            Color.Red => 1
+            Color.Green => 2
+            Color.Blue => 3
+        }
+        s = s + r
+        i = i + 1
+    }
+    return s
+}
+
+/// Entry.
+function main() -> Unit {
+    let nArith: Int = 500000000
+    let t0: Int = nanoTime()
+    arith(nArith)
+    let t1: Int = nanoTime()
+    println(concat("arith ", str(t1 - t0)))
+
+    let xs: Array<Int> = newArray(10000000)
+    var i: Int = 0
+    while i < len(xs) {
+        xs[i] = i % 100
+        i = i + 1
+    }
+    let t2: Int = nanoTime()
+    arrSum(xs, len(xs))
+    let t3: Int = nanoTime()
+    println(concat("arrSum ", str(t3 - t2)))
+
+    let nM: Int = 50000000
+    let t4: Int = nanoTime()
+    matchLoop(nM)
+    let t5: Int = nanoTime()
+    println(concat("match ", str(t5 - t4)))
+}

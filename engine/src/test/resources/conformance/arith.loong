@@ -1,0 +1,29 @@
+module demo.arith
+
+/// Entry point.
+function main() -> Unit {
+    let a: Int = 2 + 3 * 4
+    let b: Int = (2 + 3) * 4
+    let d: Int = -a + 7
+    let e: Int = 17 / 5
+    let f: Int = 17 % 5
+    let g: Int = 1 << 10
+    let h: Bool = !(a == 14)
+    let i: Float = 1.5 + 2.25
+    println(str(a))
+    println(str(b))
+    println(str(d))
+    println(str(e))
+    println(str(f))
+    println(str(g))
+    if h {
+        println("bad")
+    } else {
+        println("ok")
+    }
+    if i > 3.0 {
+        println("big")
+    } else {
+        println("small")
+    }
+}

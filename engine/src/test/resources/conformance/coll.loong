@@ -1,0 +1,31 @@
+module demo.coll
+
+/// Entry point.
+function main() -> Unit {
+    let xs: Array<Int> = [1, 2, 3, 4]
+    var sum: Int = 0
+    for x: Int in xs {
+        sum = sum + x
+    }
+    println(str(sum))
+    let m: Map<Int, String> = map { 1: "one", 2: "two" }
+    if let Option.Some(s) = m[2] {
+        println(s)
+    } else {
+        println("missing")
+    }
+    if let Option.Some(s) = m[9] {
+        println(s)
+    } else {
+        println("missing")
+    }
+    let word: String = "loong"
+    var count: Int = 0
+    for ch: Char in word {
+        count = count + 1
+    }
+    println(str(count))
+    let empty: Array<Int> = [0]
+    empty[0] = 9
+    println(str(empty[0]))
+}

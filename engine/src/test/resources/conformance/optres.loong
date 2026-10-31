@@ -1,0 +1,30 @@
+module demo.optres
+
+/// Safe division returning Result.
+function divide(a: Int, b: Int) -> Result<Int, String> {
+    if b == 0 {
+        return Result.Err("div by zero")
+    }
+    return Result.Ok(a / b)
+}
+
+/// Entry point.
+function main() -> Unit {
+    let r: Result<Int, String> = divide(a: 10, b: 2)
+    let msg: String = match r {
+        Result.Ok(v) => str(v)
+        Result.Err(e) => e
+    }
+    println(msg)
+    let bad: Result<Int, String> = divide(1, 0)
+    match bad {
+        Result.Ok(v) => println(str(v))
+        Result.Err(e) => println(e)
+    }
+    let o: Option<Int> = Option.Some(42)
+    if let Option.Some(v) = o {
+        println(str(v))
+    } else {
+        println("none")
+    }
+}

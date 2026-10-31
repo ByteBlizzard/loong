@@ -1,0 +1,20 @@
+module demo.fib
+
+/// Iterative Fibonacci.
+function fib(n: Int) -> Int {
+    var a: Int = 0
+    var b: Int = 1
+    var i: Int = 0
+    while i < n {
+        let t: Int = a + b
+        a = b
+        b = t
+        i = i + 1
+    }
+    return a
+}
+
+/// Entry point.
+function main() -> Unit {
+    println(str(fib(30)))
+}

@@ -1,0 +1,14 @@
+module demo.consts
+
+/// Greeting prefix.
+public const PREFIX: String = "hello"
+
+/// The answer.
+public const ANSWER: Int = 42
+
+/// Entry point.
+function main() -> Unit {
+    println(concat(PREFIX, " world"))
+    print(str(ANSWER))
+    println("!")
+}

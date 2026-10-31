@@ -1,0 +1,576 @@
+module loong.core
+
+/// Returns the smaller of two integers.
+public function min(a: Int, b: Int) -> Int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+/// Returns the larger of two integers.
+public function max(a: Int, b: Int) -> Int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+/// Absolute value of an integer.
+public function abs(a: Int) -> Int {
+    if a < 0 {
+        return -a
+    }
+    return a
+}
+
+/// Clamps an integer into the inclusive range [lo, hi].
+public function clamp(a: Int, lo: Int, hi: Int) -> Int {
+    return min(max(a, lo), hi)
+}
+
+/// Returns the sign of an integer: -1, 0 or 1.
+public function sign(a: Int) -> Int {
+    if a < 0 {
+        return -1
+    }
+    if a == 0 {
+        return 0
+    }
+    return 1
+}
+
+/// Squares an integer.
+public function sqr(a: Int) -> Int {
+    return a * a
+}
+
+/// Unwraps an Option, yielding the default when absent.
+public function unwrapOr<T>(o: Option<T>, def: T) -> T where T: Any {
+    match o {
+        Option.Some(v) => v
+        Option.None => def
+    }
+}
+
+/// True when the option holds a value.
+public function isSome<T>(o: Option<T>) -> Bool where T: Any {
+    match o {
+        Option.Some(v) => true
+        Option.None => false
+    }
+}
+
+/// A step of an explicit state-machine iteration: yielded element plus next state.
+public struct Step<T, S> where T: Any, S: Any {
+    /// yielded element
+    elem: T
+    /// next state
+    state: S
+}
+
+/// Maps each element with a unary function.
+public function map<T, U>(xs: Array<T>, f: (T) -> U) -> Array<U> where T: Any, U: Any {
+    let n: Int = len(xs)
+    let out: Array<U> = newArray(n)
+    var i: Int = 0
+    while i < n {
+        out[i] = f(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// Keeps only the elements matching a predicate.
+public function filter<T>(xs: Array<T>, p: (T) -> Bool) -> Array<T> where T: Any {
+    let n: Int = len(xs)
+    var m: Int = 0
+    var i: Int = 0
+    while i < n {
+        if p(xs[i]) {
+            m = m + 1
+        }
+        i = i + 1
+    }
+    let out: Array<T> = newArray(m)
+    var j: Int = 0
+    i = 0
+    while i < n {
+        if p(xs[i]) {
+            out[j] = xs[i]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Folds an array into an accumulator with a combining function.
+public function fold<T, A>(xs: Array<T>, init: A, f: (A, T) -> A) -> A where T: Any, A: Any {
+    var acc: A = init
+    let n: Int = len(xs)
+    var i: Int = 0
+    while i < n {
+        acc = f(acc, xs[i])
+        i = i + 1
+    }
+    return acc
+}
+
+/// Doubles an integer (map test helper).
+function dbl(x: Int) -> Int {
+    return x * 2
+}
+
+/// True for even integers (filter test helper).
+function even(x: Int) -> Bool {
+    return x % 2 == 0
+}
+
+/// Adds two integers (fold test helper).
+function add2(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+test "map" target: loong.core.map {
+    let src: Array<Int> = [1, 2, 3]
+    let out: Array<Int> = map(src, dbl)
+}
+
+test "filter" target: loong.core.filter {
+    let src: Array<Int> = [1, 2, 3, 4]
+    let out: Array<Int> = filter(src, even)
+}
+
+test "fold" target: loong.core.fold {
+    let src: Array<Int> = [1, 2, 3, 4]
+    let sum: Int = fold(src, 0, add2)
+}
+
+/// Unwraps a Result, yielding the default on error.
+public function unwrapOrOk<T, E>(r: Result<T, E>, def: T) -> T where T: Any, E: Any {
+    match r {
+        Result.Ok(v) => v
+        Result.Err(e) => def
+    }
+}
+
+/// True when the result is Ok.
+public function isOk<T, E>(r: Result<T, E>) -> Bool where T: Any, E: Any {
+    match r {
+        Result.Ok(v) => true
+        Result.Err(e) => false
+    }
+}
+
+/// Maps the success value of a Result with a unary function.
+public function mapOk<T, U, E>(r: Result<T, E>, f: (T) -> U) -> Result<U, E> where T: Any, U: Any, E: Any {
+    match r {
+        Result.Ok(v) => Result.Ok(f(v))
+        Result.Err(e) => Result.Err(e)
+    }
+}
+
+test "unwrapOrOk" target: loong.core.unwrapOrOk {
+    let a: Int = unwrapOrOk(Result.Ok(5), 0)
+    let b: Int = unwrapOrOk(Result.Err("x"), 9)
+}
+
+test "isOk" target: loong.core.isOk {
+    let a: Bool = isOk(Result.Ok(1))
+    let b: Bool = isOk(Result.Err("e"))
+}
+
+test "mapOk" target: loong.core.mapOk {
+    let r: Result<Int, String> = mapOk(Result.Ok(2), dbl)
+    let e: Result<Int, String> = mapOk(Result.Err("err"), dbl)
+}
+
+external java "java.lang.Math" {
+    static function pow(x: Float, y: Float) -> Float
+    static function sqrt(x: Float) -> Float
+    static function jround(d: Float) -> Int as "round"
+}
+
+/// Smaller of two floats.
+public function fmin(a: Float, b: Float) -> Float {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+/// Larger of two floats.
+public function fmax(a: Float, b: Float) -> Float {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+/// Absolute value of a float.
+public function fabs(a: Float) -> Float {
+    if a < 0.0 {
+        return -a
+    }
+    return a
+}
+
+/// x raised to the power y (JVM Math.pow).
+public function fpow(x: Float, y: Float) -> Float {
+    return pow(x: x, y: y)
+}
+
+/// Square root (JVM Math.sqrt).
+public function fsqrt(x: Float) -> Float {
+    return sqrt(x: x)
+}
+
+/// Maps the value of an Option with a unary function.
+public function mapOpt<T, U>(o: Option<T>, f: (T) -> U) -> Option<U> where T: Any, U: Any {
+    match o {
+        Option.Some(v) => Option.Some(f(v))
+        Option.None => Option.None
+    }
+}
+
+/// Sums an array of integers.
+public function sumInt(xs: Array<Int>) -> Int {
+    return fold(xs, 0, addInt)
+}
+
+/// True when the array contains the value.
+public function containsInt(xs: Array<Int>, v: Int) -> Bool {
+    let n: Int = len(xs)
+    var i: Int = 0
+    while i < n {
+        if xs[i] == v {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Adds two integers (sumInt helper).
+function addInt(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+test "fmin" target: loong.core.fmin {
+    let r: Float = fmin(1.5, 2.5)
+}
+
+test "fmax" target: loong.core.fmax {
+    let r: Float = fmax(1.5, 2.5)
+}
+
+test "fabs" target: loong.core.fabs {
+    let r: Float = fabs(-2.5)
+}
+
+test "fpow" target: loong.core.fpow {
+    let r: Float = fpow(2.0, 10.0)
+}
+
+test "fsqrt" target: loong.core.fsqrt {
+    let r: Float = fsqrt(9.0)
+}
+
+test "mapOpt" target: loong.core.mapOpt {
+    let r: Option<Int> = mapOpt(Option.Some(2), dbl)
+}
+
+test "sumInt" target: loong.core.sumInt {
+    let r: Int = sumInt([1, 2, 3])
+}
+
+test "containsInt" target: loong.core.containsInt {
+    let a: Bool = containsInt([1, 2], 2)
+}
+
+external java "java.lang.String" {
+    instance function charAt(self: String, i: Int32) -> Char
+    instance function substring(self: String, b: Int32, e: Int32) -> String
+    instance function indexOf(self: String, s: String) -> Int32
+    instance function toUpperCase(self: String) -> String
+    instance function toLowerCase(self: String) -> String
+}
+
+/// Character at index.
+public function at(s: String, i: Int) -> Char {
+    return charAt(self: s, i: to32(i))
+}
+
+/// Substring [from, until).
+public function sub(s: String, from: Int, until: Int) -> String {
+    return substring(self: s, b: to32(from), e: to32(until))
+}
+
+/// Index of the first occurrence, or -1.
+public function find(s: String, w: String) -> Int {
+    return to64(indexOf(self: s, s: w))
+}
+
+/// Uppercased copy.
+public function upper(s: String) -> String {
+    return toUpperCase(self: s)
+}
+
+/// Lowercased copy.
+public function lower(s: String) -> String {
+    return toLowerCase(self: s)
+}
+
+test "at" target: loong.core.at {
+    let c: Char = at("hi", 0)
+}
+
+test "sub" target: loong.core.sub {
+    let r: String = sub("hello world", 0, 5)
+}
+
+test "find" target: loong.core.find {
+    let a: Int = find("hello", "ll")
+    let b: Int = find("hello", "zz")
+}
+
+test "upper" target: loong.core.upper {
+    let r: String = upper("ab")
+}
+
+test "lower" target: loong.core.lower {
+    let r: String = lower("AB")
+}
+
+external java "java.lang.String" {
+    static function valueOf(c: Char) -> String
+    instance function isEmpty(self: String) -> Bool
+    instance function startsWith(self: String, p: String) -> Bool
+    instance function endsWith(self: String, p: String) -> Bool
+    instance function trim(self: String) -> String
+}
+
+/// Character to string.
+public function charStr(c: Char) -> String {
+    return valueOf(c)
+}
+
+/// True when the string is empty.
+public function empty(s: String) -> Bool {
+    return isEmpty(self: s)
+}
+
+/// True when s starts with the prefix.
+public function starts(s: String, p: String) -> Bool {
+    return startsWith(self: s, p: p)
+}
+
+/// True when s ends with the suffix.
+public function ends(s: String, p: String) -> Bool {
+    return endsWith(self: s, p: p)
+}
+
+/// Copy with leading/trailing whitespace removed.
+public function trimmed(s: String) -> String {
+    return trim(self: s)
+}
+
+/// True when c is a decimal digit.
+public function isDigit(c: Char) -> Bool {
+    if c >= '0' {
+        if c <= '9' {
+            return true
+        }
+    }
+    return false
+}
+
+/// True when c is an ASCII letter.
+public function isLetter(c: Char) -> Bool {
+    if c >= 'a' {
+        if c <= 'z' {
+            return true
+        }
+    }
+    if c >= 'A' {
+        if c <= 'Z' {
+            return true
+        }
+    }
+    return false
+}
+
+/// Explicit Int to Float conversion.
+public function toFloat(v: Int) -> Float {
+    return tof(v)
+}
+
+/// Explicit Float to Int rounding (JVM Math.round, half-up).
+public function round(v: Float) -> Int {
+    return jround(v)
+}
+
+/// Equality with tolerance.
+public function nearEq(a: Float, b: Float, eps: Float) -> Bool {
+    return fabs(a - b) < eps
+}
+
+/// Divides with a fallback default instead of an error path.
+public function divOr(a: Int, b: Int, def: Int) -> Int {
+    if b == 0 {
+        return def
+    }
+    return a / b
+}
+
+/// Modulo with a fallback default.
+public function modOr(a: Int, b: Int, def: Int) -> Int {
+    if b == 0 {
+        return def
+    }
+    return a % b
+}
+
+test "charStr" target: loong.core.charStr {
+    let r: String = charStr('x')
+}
+
+test "empty" target: loong.core.empty {
+    let a: Bool = empty("")
+    let b: Bool = empty("x")
+}
+
+test "starts" target: loong.core.starts {
+    let r: Bool = starts("hello", "he")
+}
+
+test "ends" target: loong.core.ends {
+    let r: Bool = ends("hello", "lo")
+}
+
+test "trimmed" target: loong.core.trimmed {
+    let r: String = trimmed("  x  ")
+}
+
+test "isDigit" target: loong.core.isDigit {
+    let a: Bool = isDigit('5')
+    let b: Bool = isDigit('x')
+}
+
+test "isLetter" target: loong.core.isLetter {
+    let a: Bool = isLetter('q')
+    let b: Bool = isLetter('5')
+}
+
+test "toFloat" target: loong.core.toFloat {
+    let r: Float = toFloat(3)
+}
+
+test "round" target: loong.core.round {
+    let r: Int = round(2.9)
+}
+
+test "nearEq" target: loong.core.nearEq {
+    let r: Bool = nearEq(0.1 + 0.2, 0.3, 0.0001)
+}
+
+test "divOr" target: loong.core.divOr {
+    let a: Int = divOr(10, 2, -1)
+    let b: Int = divOr(10, 0, -1)
+}
+
+test "modOr" target: loong.core.modOr {
+    let a: Int = modOr(10, 3, -1)
+    let b: Int = modOr(10, 0, -1)
+}
+
+external java "java.lang.Character" {
+    static function isWhitespace(c: Char) -> Bool
+    static function isUpperCase(c: Char) -> Bool
+    static function isLowerCase(c: Char) -> Bool
+    static function ctu(c: Char) -> Char as "toUpperCase"
+    static function ctl(c: Char) -> Char as "toLowerCase"
+}
+
+/// True when c is whitespace (Unicode).
+public function isSpace(c: Char) -> Bool {
+    return isWhitespace(c)
+}
+
+/// True when c is uppercase (Unicode).
+public function isUpper(c: Char) -> Bool {
+    return isUpperCase(c)
+}
+
+/// True when c is lowercase (Unicode).
+public function isLower(c: Char) -> Bool {
+    return isLowerCase(c)
+}
+
+/// Uppercased copy of c (Unicode).
+public function toUpper(c: Char) -> Char {
+    return ctu(c)
+}
+
+/// Lowercased copy of c (Unicode).
+public function toLower(c: Char) -> Char {
+    return ctl(c)
+}
+
+test "isSpace" target: loong.core.isSpace {
+    let a: Bool = isSpace(' ')
+    let b: Bool = isSpace('x')
+}
+
+test "isUpper" target: loong.core.isUpper {
+    let a: Bool = isUpper('A')
+    let b: Bool = isUpper('a')
+}
+
+test "isLower" target: loong.core.isLower {
+    let a: Bool = isLower('a')
+}
+
+test "toUpper" target: loong.core.toUpper {
+    let r: Char = toUpper('a')
+}
+
+test "toLower" target: loong.core.toLower {
+    let r: Char = toLower('A')
+}
+
+test "min" target: loong.core.min {
+    let r: Int = min(a: 2, b: 3)
+}
+
+test "max" target: loong.core.max {
+    let r: Int = max(a: 2, b: 3)
+}
+
+test "abs" target: loong.core.abs {
+    let r: Int = abs(-7)
+}
+
+test "clamp" target: loong.core.clamp {
+    let r: Int = clamp(a: 42, lo: 0, hi: 10)
+}
+
+test "sign" target: loong.core.sign {
+    let r: Int = sign(-5)
+}
+
+test "sqr" target: loong.core.sqr {
+    let r: Int = sqr(6)
+}
+
+test "unwrapOr" target: loong.core.unwrapOr {
+    let a: Int = unwrapOr(Option.Some(5), 0)
+    let b: Int = unwrapOr(Option.None, 9)
+    let c: String = unwrapOr(Option.None, "d")
+}
+
+test "isSome" target: loong.core.isSome {
+    let r: Bool = isSome(Option.Some(1))
+    let s: Bool = isSome(Option.None)
+}

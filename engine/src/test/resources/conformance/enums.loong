@@ -1,0 +1,37 @@
+module demo.enums
+
+/// Colors.
+public enum Color {
+    Red
+    Green
+    Blue
+}
+
+/// Name of a color.
+function name(c: Color) -> String {
+    match c {
+        Color.Red => "red"
+        Color.Green => "green"
+        Color.Blue => "blue"
+    }
+}
+
+/// Entry point.
+function main() -> Unit {
+    let c: Color = Color.Green
+    println(name(c))
+    match c {
+        Color.Green => { println("g") }
+        _ => { println("other") }
+    }
+    let n: Int = 7
+    match n {
+        7 => { println("lucky") }
+        _ => { println("unlucky") }
+    }
+    if let Color.Red = c {
+        println("red!")
+    } else {
+        println("not red")
+    }
+}

@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Loong Console</title>
+<style>
+  :root { --bg:#14161a; --panel:#1d2026; --line:#2a2e36; --fg:#d7dae0; --dim:#8b93a1; --acc:#4f9cf9; --err:#f06a6a; --ok:#5fbf87; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; color:var(--acc); }
+  nav button { background:none; border:1px solid var(--line); color:var(--dim); padding:4px 12px; border-radius:6px; cursor:pointer; }
+  nav button.on { color:var(--fg); border-color:var(--acc); }
+  main { padding:16px; }
+  .row { display:flex; gap:16px; }
+  .col { flex:1; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
+  pre { margin:0; white-space:pre; overflow:auto; font:13px/1.55 Consolas,monospace; }
+  .diag { display:flex; gap:8px; padding:4px 6px; border-radius:4px; cursor:pointer; }
+  .diag:hover { background:#262a31; }
+  .diag .code { color:var(--err); font-family:Consolas,monospace; }
+  .muted { color:var(--dim); }
+  .pill { font-size:12px; padding:1px 8px; border-radius:10px; border:1px solid var(--line); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.err { color:var(--err); border-color:var(--err); }
+  .ev { padding:3px 6px; border-bottom:1px solid var(--line); font-family:Consolas,monospace; font-size:12px; }
+  pre.usage { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; margin:6px 0; }
+  button.act { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:4px 12px; cursor:pointer; }
+  button.gray { background:none; color:var(--dim); border:1px solid var(--line); border-radius:6px; padding:4px 12px; cursor:pointer; }
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; }
+  #modal .box { background:var(--panel); border:1px solid var(--acc); border-radius:10px; padding:20px; width:420px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Loong Console</h1>
+  <nav>
+    <button data-t="home" class="on">首页</button>
+    <button data-t="mcp">MCP</button>
+    <button data-t="code">代码</button>
+    <button data-t="diag">诊断池</button>
+    <button data-t="tests">测试</button>
+    <button data-t="deps">依赖</button>
+    <button data-t="stream">AI 活动流</button>
+  </nav>
+  <span class="muted" id="conn">连接中…</span>
+</header>
+<main>
+  <div class="row"><div class="col"><select id="mod" style="background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px"></select>
+  <span id="rev" class="pill"></span></div></div>
+
+  <section id="p-home" class="row" style="margin-top:12px">
+    <div class="col" style="flex:2">
+      <b>Loong 是什么</b>
+      <p class="muted">面向 AI 编程的显式结构语言，编译到 JVM。AI 直接编辑 AST 节点（不是文本），
+      每次编辑自动触发增量编译；人类通过本页面监督、审批，不逐行读代码。</p>
+
+      <b style="display:block;margin-top:16px">开始使用</b>
+      <div class="ev">1. 建个项目目录进去，敲 loong 就能用（无参数 = loong up，启动/复用本目录的 daemon）：</div>
+      <pre class="usage">mkdir myproj &amp;&amp; cd myproj
+loong        # 前台启动 daemon（Ctrl+C 停止）；已在运行则显示地址直接复用</pre>
+      <div class="ev">2. 把编程 agent 经 MCP 接入：command 填 <code>&lt;安装目录&gt;/loong</code>，args 填 <code>["mcp", "--project", "&lt;项目目录&gt;"]</code>（「MCP」页有可复制的配置模板与连接状态）</div>
+      <div class="ev">3. agent 编辑节点 → 本页「AI 活动流」实时显示每次变更与诊断</div>
+      <div class="ev">4. agent 请求审批时，本页弹出「人工审批」对话框，批准或拒绝</div>
+      <div class="ev">5. 「代码」页签是 AST 渲染的只读文本视图（悬停可见节点 ID 与诊断）</div>
+      <div class="ev">6. 「测试」页签运行内联测试；「版本历史」由 agent 的 commit/diff/checkout 工具驱动</div>
+
+      <b style="display:block;margin-top:16px">loong 命令详细用法</b>
+      <pre class="usage">loong                    启动/复用当前目录的 daemon（默认命令，等同 loong up）
+loong up                 未运行则前台启动（Ctrl+C 停止）；已在运行则显示地址复用
+loong stop               停止当前目录的 daemon
+loong mcp                MCP stdio 桥（agent 接入用，由 agent 拉起，一般不手敲）
+loong list               列出本机所有运行中的 Loong daemon（PID/端口/项目目录）
+loong check &lt;file&gt;       编译检查；build &lt;file&gt; [-d &lt;dir&gt;]；run &lt;file&gt;；test &lt;file&gt;
+loong help               完整帮助        loong --version  查看版本
+
+项目目录：缺省 = 当前工作目录，--project &lt;目录&gt; 或环境变量 LOONG_PROJECT 覆盖；
+产物就地落盘：workspace.db、loongd.json（端点）、registry/、cache/、daemon.log。
+每个项目一个常驻 daemon，端口随机分配互不冲突；Web UI 地址以启动输出为准（即本页）。</pre>
+
+      <b style="display:block;margin-top:16px">本页各页签</b>
+      <div class="ev">代码 — AST 渲染文本 + 实时诊断　|　诊断池 — 全量诊断列表</div>
+      <div class="ev">测试 — 运行与结果（按 Test 节点 ID 索引）　|　依赖 — depends 声明</div>
+      <div class="ev">AI 活动流 — SSE 实时事件（变更/审批请求）　|　MCP — agent 接入指南与连接状态</div>
+    </div>
+    <div class="col">
+      <b>服务状态</b>
+      <div id="home-status" style="margin-top:8px">检测中…</div>
+      <p class="muted" style="margin-top:12px">语言纪律由编译器强制：每个函数必须有 doc 注释与测试、
+      函数体超过 50 条语句拒绝编译、模块循环依赖拒绝编译——不靠 review 维持。</p>
+    </div>
+  </section>
+
+  <section id="p-mcp" class="row" style="display:none;margin-top:12px">
+    <div class="col" style="flex:2">
+      <b>如何把编程 agent 接入 Loong</b>
+      <p class="muted">把 <code>loong</code> 配置为 agent 的 MCP server（args 首参 <code>mcp</code>，stdio JSON-RPC）。
+      桥启动时自动确保 daemon 在运行（未运行则拉起）——agent 先起、用户先起都成立；
+      agent 断开后 daemon 常驻（<code>loong stop</code> 停止）；同一项目可挂多个 agent，
+      多项目互不冲突（<code>loong list</code> 查看本机全部）。</p>
+
+      <b style="display:block;margin-top:14px">配置模板（Claude Desktop / 任何 MCP 客户端）</b>
+      <pre id="mcp-config" style="margin-top:6px;background:var(--bg);padding:10px;border-radius:6px;user-select:all"></pre>
+      <button class="act" style="margin-top:8px" onclick="copyMcpConfig()">复制配置</button>
+      <span id="mcp-copied" class="muted" style="margin-left:10px"></span>
+
+      <b style="display:block;margin-top:16px">agent 可用的工具面</b>
+      <div class="ev">读：get_diagnostics / get_node / find_nodes / get_module_interface / get_dependencies</div>
+      <div class="ev">写（自动触发增量编译，诊断随响应返回）：insert_node / replace_node / move_node / delete_node</div>
+      <div class="ev">检查与测试：check / run_tests　|　依赖：add_dependency / remove_dependency</div>
+      <div class="ev">版本：commit / log / diff / checkout　|　发布：publish（版本号 x.y.z）</div>
+      <div class="ev">协作：request_human_review（挂起等待人类在本页批准）</div>
+    </div>
+    <div class="col">
+      <b>连接状态</b>
+      <div id="mcp-status" style="margin-top:8px">检测中…</div>
+      <p class="muted" style="margin-top:12px">判定：agent 通过 MCP server 发出的请求携带
+      <code>X-Loong-Client: mcp</code> 标识；30 秒内有活动即视为已连接。</p>
+    </div>
+  </section>
+
+  <section id="p-code" class="row" style="display:none;margin-top:12px">
+    <div class="col" style="flex:2"><b>代码视图（AST 渲染）</b><pre id="code" style="margin-top:8px">—</pre></div>
+    <div class="col"><b>诊断</b><div id="code-diag" style="margin-top:8px">—</div></div>
+  </section>
+
+  <section id="p-diag" class="row" style="display:none;margin-top:12px">
+    <div class="col"><b>诊断池（全模块）</b><div id="all-diag" style="margin-top:8px">—</div></div>
+  </section>
+
+  <section id="p-tests" class="row" style="display:none;margin-top:12px">
+    <div class="col"><b>测试面板</b> <button class="act" onclick="runTests()">运行测试</button>
+      <div id="tests" style="margin-top:8px">—</div></div>
+  </section>
+
+  <section id="p-deps" class="row" style="display:none;margin-top:12px">
+    <div class="col"><b>依赖（depends 声明）</b><div id="deps" style="margin-top:8px">—</div>
+      <p class="muted">依赖图可视化与 MVS 版本选择随 M4 注册表 UI 增强。</p></div>
+  </section>
+
+  <section id="p-stream" class="row" style="display:none;margin-top:12px">
+    <div class="col"><b>AI 活动流（SSE 实时）</b><div id="events" style="margin-top:8px;max-height:360px;overflow:auto"></div></div>
+    <div class="col"><b>待审请求</b><div id="reviews" style="margin-top:8px">—</div></div>
+  </section>
+</main>
+
+<div id="modal"><div class="box">
+  <b id="m-title">人工审批请求</b>
+  <p id="m-body" style="color:var(--dim)">…</p>
+  <div style="text-align:right">
+    <button class="gray" onclick="respond(false)">拒绝</button>
+    <button class="act" onclick="respond(true)">批准</button>
+  </div>
+</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const enc = m => encodeURIComponent(m);
+let current = null, pendingReview = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return t; }
+}
+
+async function refreshModules() {
+  const d = await api('/modules');
+  const sel = $('#mod');
+  sel.innerHTML = '';
+  (d.modules || []).forEach(m => {
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m;
+    sel.appendChild(o);
+  });
+  if ((d.modules || []).length) { current = d.modules[0]; sel.value = current; refreshAll(); }
+}
+
+async function refreshAll() {
+  if (!current) return;
+  const [code, diag] = await Promise.all([
+    api('/modules/' + enc(current) + '/render'),
+    api('/modules/' + enc(current) + '/diagnostics'),
+  ]);
+  $('#code').textContent = code;
+  $('#rev').textContent = 'rev ' + diag.revision;
+  renderDiag($('#code-diag'), diag.diagnostics || []);
+  // 诊断池：当前模块（多模块时聚合）
+  renderDiag($('#all-diag'), diag.diagnostics || []);
+  const deps = await api('/modules/' + enc(current) + '/deps');
+  $('#deps').innerHTML = (deps.dependencies || []).map(d =>
+    `<div class="ev">${d.module}${d.constraint ? ' ' + d.constraint : ''}</div>`).join('') || '<span class="muted">无</span>';
+}
+
+function renderDiag(el, list) {
+  el.innerHTML = list.length ? list.map(d =>
+    `<div class="diag" title="节点 ${d.node}"><span class="code">${d.code}</span><span>${d.message}</span></div>`).join('')
+    : '<span class="pill ok">无诊断</span>';
+}
+
+async function runTests() {
+  const r = await api('/modules/' + enc(current) + '/test', { method: 'POST', body: '{}' });
+  if (r.error) { $('#tests').innerHTML = `<span class="pill err">${r.error}</span>`; return; }
+  $('#tests').innerHTML = `通过 ${r.passed}/${r.total}` + (r.results || []).map(t =>
+    `<div class="ev">${t.passed ? '<span class="pill ok">PASS</span>' : '<span class="pill err">FAIL</span>'} ${t.name}${t.error ? ' — ' + t.error : ''} <span class="muted">(test ${t.test})</span></div>`).join('');
+}
+
+function pushEvent(text) {
+  const div = document.createElement('div');
+  div.className = 'ev';
+  div.textContent = text;
+  $('#events').prepend(div);
+}
+
+// SSE：变更与审批请求实时推送
+const es = new EventSource('/events');
+es.onopen = () => $('#conn').textContent = '已连接';
+es.onerror = () => $('#conn').textContent = '已断开';
+es.onmessage = e => {
+  pushEvent(e.data);
+  let d; try { d = JSON.parse(e.data); } catch { return; }
+  if (d.type === 'review_requested') openReview(d.review);
+  if (d.type === 'mutation') refreshAll();
+  if (d.type === 'review_responded' && pendingReview === d.review) closeReview();
+};
+
+async function openReview(id) {
+  const d = await api('/review/pending');
+  const r = (d.pending || []).find(x => x.id === id);
+  if (!r) return;
+  pendingReview = id;
+  $('#m-body').textContent = `${r.module}：${r.reason || '（无说明）'}`;
+  $('#modal').style.display = 'flex';
+}
+
+function closeReview() { pendingReview = null; $('#modal').style.display = 'none'; refreshReviews(); }
+
+async function respond(approved) {
+  if (pendingReview == null) return;
+  await api(`/review/${pendingReview}/respond`, {
+    method: 'POST', body: JSON.stringify({ approved }),
+  });
+  closeReview();
+}
+
+async function refreshReviews() {
+  const d = await api('/review/pending');
+  $('#reviews').innerHTML = (d.pending || []).map(r =>
+    `<div class="ev">#${r.id} ${r.module} — ${r.reason}
+       <button class="act" onclick="quick(${r.id},true)">批准</button>
+       <button class="gray" onclick="quick(${r.id},false)">拒绝</button></div>`).join('')
+    || '<span class="muted">无待审请求</span>';
+}
+async function quick(id, approved) {
+  await api(`/review/${id}/respond`, { method: 'POST', body: JSON.stringify({ approved }) });
+  refreshReviews();
+}
+
+// 标签页
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  ['home','mcp','code','diag','tests','deps','stream'].forEach(t =>
+    $('#p-' + t).style.display = t === b.dataset.t ? 'flex' : 'none');
+  if (b.dataset.t === 'stream') refreshReviews();
+  if (b.dataset.t === 'mcp') refreshMcpStatus();
+});
+
+// 首页状态
+async function refreshHomeStatus() {
+  try {
+    const d = await api('/health');
+    document.getElementById('home-status').innerHTML =
+      '<span class="pill ok">daemon 在线</span> <span class="muted">v' + d.version + '</span>';
+  } catch (e) {
+    document.getElementById('home-status').innerHTML = '<span class="pill err">daemon 离线</span>';
+  }
+}
+
+// MCP 页：状态 + 配置模板
+async function refreshMcpStatus() {
+  let out = '';
+  try {
+    const h = await api('/health');
+    out += '<div class="ev"><span class="pill ok">MCP server</span> <span class="muted">随 daemon 运行（stdio）</span></div>';
+    const m = await api('/mcp/status');
+    out += m.agentConnected
+      ? '<div class="ev"><span class="pill ok">agent 已连接</span> <span class="muted">最近活动 ' + Math.round((m.lastActivityAgoMs || 0) / 1000) + ' 秒前</span></div>'
+      : (m.lastActivityAgoMs
+        ? '<div class="ev"><span class="pill">agent 未连接</span> <span class="muted">最近活动 ' + Math.round(m.lastActivityAgoMs / 1000) + ' 秒前</span></div>'
+        : '<div class="ev"><span class="pill">agent 未连接</span> <span class="muted">尚无 MCP 活动；配置 agent 后自动更新</span></div>');
+  } catch (e) {
+    out = '<span class="pill err">daemon 离线</span>';
+  }
+  document.getElementById('mcp-status').innerHTML = out;
+}
+
+function mcpConfigText() {
+  const exeSuffix = navigator.platform.toLowerCase().includes('win') ? '.cmd' : '';
+  return JSON.stringify({
+    mcpServers: {
+      loong: {
+        command: '<安装目录>/loong' + exeSuffix,
+        args: ['mcp', '--project', '<项目目录>'],
+      },
+    },
+  }, null, 2);
+}
+
+function copyMcpConfig() {
+  navigator.clipboard.writeText(mcpConfigText()).then(() => {
+    document.getElementById('mcp-copied').textContent = '已复制';
+    setTimeout(() => { document.getElementById('mcp-copied').textContent = ''; }, 2000);
+  });
+}
+
+document.getElementById('mcp-config').textContent = mcpConfigText();
+setInterval(() => {
+  if (document.getElementById('p-mcp').style.display !== 'none') refreshMcpStatus();
+}, 5000);
+refreshHomeStatus();
+setInterval(refreshHomeStatus, 10000);
+
+$('#mod').onchange = e => { current = e.target.value; refreshAll(); };
+refreshModules();
+</script>
+</body>
+</html>

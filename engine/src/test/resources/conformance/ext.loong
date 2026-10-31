@@ -1,0 +1,10 @@
+module demo.ext
+
+external java "java.lang.Math" {
+    static function abs(x: Int) -> Int
+}
+
+/// Entry point.
+function main() -> Unit {
+    println(str(abs(x: -7)))
+}

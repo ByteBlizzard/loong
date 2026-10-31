@@ -1,0 +1,14 @@
+module demo.fac
+
+/// Computes n! recursively.
+function fac(n: Int) -> Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * fac(n - 1)
+}
+
+/// Entry point.
+function main() -> Unit {
+    println(str(fac(10)))
+}

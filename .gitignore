@@ -1,0 +1,35 @@
+# Loong 项目目录产物（loong 在某目录起 daemon 时就地落盘；防误在仓库根运行时入库）
+workspace.db*
+loongd.json
+registry/
+cache/
+loong-project/
+loong-out/
+
+# Gradle
+.gradle/
+build/
+out/
+
+# Kotlin 会话/构建数据
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 构建产物
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# 本地环境与日志
+local.properties
+*.log
+*.hprof
+hs_err_pid*
+
+# 系统文件
+.DS_Store
+Thumbs.db

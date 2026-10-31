@@ -1,0 +1,13 @@
+module demo.tasks
+
+/// Doubles a number.
+function work(n: Int) -> Int {
+    return n * 2
+}
+
+/// Entry point.
+function main() -> Unit {
+    let h: Handle<Int> = spawn work(n: 21)
+    let v: Int = join h
+    println(str(v))
+}

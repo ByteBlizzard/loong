@@ -1,0 +1,16 @@
+[versions]
+kotlin = "2.4.21"
+junit = "5.11.4"
+junit-platform = "1.11.4"
+asm = "9.7.1"
+h2 = "2.3.232"
+
+[libraries]
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-platform" }
+asm-core = { module = "org.ow2.asm:asm", version.ref = "asm" }
+asm-util = { module = "org.ow2.asm:asm-util", version.ref = "asm" }
+h2 = { module = "com.h2database:h2", version.ref = "h2" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

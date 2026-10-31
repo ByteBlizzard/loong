@@ -1,0 +1,25 @@
+#!/bin/sh
+# Loong 单一命令入口（无扩展名的 Unix 脚本）。
+#
+#   loong                  启动/复用当前目录的 daemon（默认命令，等同 loong up）
+#   loong up               未运行则前台启动（Ctrl+C 停止）；已在运行则显示地址复用
+#   loong stop             停止当前目录的 daemon
+#   loong mcp              MCP stdio 桥（agent 接入用，由 agent 拉起）
+#   loong list             列出本机所有运行中的 Loong daemon
+#   loong check|build|run|test <file>   编译器
+#   loong help             完整用法
+#
+# 项目目录缺省 = 当前工作目录（建目录、cd 进去、敲 loong 即可）；
+# --project <目录> 或环境变量 LOONG_PROJECT 可覆盖。
+# 一律执行 java -jar 同目录下的 loong.jar。
+set -e
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "$JAVA_HOME" ]; then
+    JAVA="$JAVA_HOME/bin/java"
+else
+    JAVA=$(command -v java) || {
+        echo "错误：未找到 java。请安装 Java 21+ 或设置 JAVA_HOME。" >&2
+        exit 1
+    }
+fi
+exec "$JAVA" -jar "$DIR/loong.jar" "$@"
