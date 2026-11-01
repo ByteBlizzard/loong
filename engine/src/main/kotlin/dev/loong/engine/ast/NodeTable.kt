@@ -196,6 +196,18 @@ class NodeTable(val allocator: IdAllocator = IdAllocator()) {
     // ---------- 一致性检查 ----------
 
     /**
+     * 深拷贝（节点映射 + 分配水位）：写入事务的回滚快照。
+     * 节点为不可变值对象、kids 列表只经编辑操作整体替换，浅复制映射即安全；
+     * 水位一并继承——回滚后新分配的 ID 不与快照前签发的 ID 冲突（ADR-0004 永不复用）。
+     */
+    fun snapshot(): NodeTable {
+        val copy = NodeTable(IdAllocator(allocator.watermark))
+        for ((id, node) in nodes) copy.nodes[id] = node
+        return copy
+    }
+
+
+    /**
      * 校验 ast-schema-v1.md §3 的不变量（测试与 daemon 恢复后调用）。
      * 返回违例描述列表，空列表 = 通过。
      */

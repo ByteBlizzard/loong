@@ -46,12 +46,29 @@ object ExternalVerifier {
                 )
                 continue
             }
+            // 进程终结类黑名单：测试在 daemon 进程内反射执行（TestRunner），声明并调用
+            // exit/halt 会直接杀死 daemon（MCP 连接「无字节返回」的元凶之一）。
+            val lethal = LETHAL_METHODS[cls.name]
+            if (lethal != null) {
+                diags += Diagnostic(
+                    decl, Severity.Error, DiagCodes.E_EXTERNAL_METHOD_NOT_FOUND,
+                    "declaring '${cls.name}' is not allowed: ${lethal} terminates the loongd process; " +
+                        "end a test by failing an assertion instead of exiting",
+                )
+                continue
+            }
             for (m in table[decl].kids.filter { table[it].kind == Kind.ExternalMethod }) {
                 verifyMethod(table, m, cls, externals, loader, diags)
             }
         }
         return diags
     }
+
+    /** 会终结进程的类 → 触发原因（external 声明黑名单）。 */
+    private val LETHAL_METHODS = mapOf(
+        "java.lang.System" to "System.exit / load / loadLibrary",
+        "java.lang.Runtime" to "Runtime.exit / halt",
+    )
 
     private fun verifyMethod(
         table: NodeTable,

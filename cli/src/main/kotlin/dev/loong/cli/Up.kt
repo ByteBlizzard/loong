@@ -32,6 +32,15 @@ fun startFullStack(args: Array<String>) {
         exitProcess(0)
     }
 
+    // 同项目单实例锁：文件锁跨进程互斥（探活 + 二次探活只是竞态缓解，锁才是硬保证——
+    // 两个 loong up 同时起再也不会都活下来）。拿不到锁 = 有同伴在启动/运行 → 轮询等它就位。
+    val lock = DaemonCtl.acquireStartupLock(projectDir)
+    if (lock == null) {
+        val winner = DaemonCtl.waitForWinner(projectDir)
+        System.err.println("  Loong daemon 已在运行（复用 ${winner.baseUrl}）")
+        exitProcess(0)
+    }
+
     val db = projectDir.resolve("workspace.db").also { Files.createDirectories(it.parent) }
     val server = LoongdServer(0, db, projectDir.resolve("registry"))
     val ep = DaemonCtl.Endpoint(server.port(), ProcessHandle.current().pid())
@@ -39,6 +48,7 @@ fun startFullStack(args: Array<String>) {
     // 双启动竞态兜底：绑定后再探一次端点文件，发现别的 daemon 已就位则让位
     DaemonCtl.probe(projectDir)?.let { winner ->
         runCatching { server.close() }
+        DaemonCtl.releaseStartupLock(lock)
         System.err.println("  Loong daemon 已在运行（复用 ${winner.baseUrl}）")
         exitProcess(0)
     }
@@ -50,6 +60,7 @@ fun startFullStack(args: Array<String>) {
         runCatching { server.close() }
         runCatching { Files.deleteIfExists(endpointFile) }
         DaemonCtl.unregister(ep.pid)
+        DaemonCtl.releaseStartupLock(lock)
     })
 
     // 日志走 stderr（detached 模式汇入 <项目目录>/daemon.log）

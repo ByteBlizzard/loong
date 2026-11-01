@@ -132,6 +132,69 @@ function add2(a: Int, b: Int) -> Int {
     return a + b
 }
 
+
+/// Joins the parts with sep between consecutive elements.
+public function joinWith(xs: Array<String>, sep: String) -> String {
+    let n: Int = len(xs)
+    if n == 0 {
+        return ""
+    }
+    var out: String = xs[0]
+    var i: Int = 1
+    while i < n {
+        out = concat(concat(out, sep), xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// Splits s around every occurrence of sep (empty parts are kept, including a trailing one).
+public function split(s: String, sep: Char) -> Array<String> {
+    let n: Int = len(s)
+    var count: Int = 1
+    var i: Int = 0
+    while i < n {
+        if at(s, i) == sep {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    let parts: Array<String> = newArray(count)
+    var part: Int = 0
+    var start: Int = 0
+    i = 0
+    while i < n {
+        if at(s, i) == sep {
+            parts[part] = sub(s, start, i)
+            part = part + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    parts[part] = sub(s, start, n)
+    return parts
+}
+
+/// Sorts the array ascending, in place; returns the same array.
+public function sort(xs: Array<Int>) -> Array<Int> {
+    let n: Int = len(xs)
+    var i: Int = 1
+    while i < n {
+        let key: Int = xs[i]
+        var j: Int = i - 1
+        while j >= 0 {
+            if xs[j] <= key {
+                break
+            }
+            xs[j + 1] = xs[j]
+            j = j - 1
+        }
+        xs[j + 1] = key
+        i = i + 1
+    }
+    return xs
+}
+
 test "map" target: loong.core.map {
     let src: Array<Int> = [1, 2, 3]
     let out: Array<Int> = map(src, dbl)
@@ -573,4 +636,35 @@ test "unwrapOr" target: loong.core.unwrapOr {
 test "isSome" target: loong.core.isSome {
     let r: Bool = isSome(Option.Some(1))
     let s: Bool = isSome(Option.None)
+}
+
+test "joinWith" target: loong.core.joinWith {
+    let a: String = joinWith(["a", "b", "c"], "-")
+    let b: String = joinWith(["x"], ", ")
+    let none: Array<String> = []
+    let empty: String = joinWith(none, "/")
+    assert(a == "a-b-c")
+    assert(b == "x")
+    assert(empty == "")
+}
+
+test "split" target: loong.core.split {
+    let parts: Array<String> = split("a,b,,c", ',')
+    assert(len(parts) == 4)
+    assert(parts[0] == "a")
+    assert(parts[1] == "b")
+    assert(parts[2] == "")
+    assert(parts[3] == "c")
+    let none: Array<String> = split("", ',')
+    assert(len(none) == 1)
+    assert(none[0] == "")
+}
+
+test "sort" target: loong.core.sort {
+    let r: Array<Int> = sort([3, 1, 2, 1])
+    assert(len(r) == 4)
+    assert(r[0] == 1)
+    assert(r[1] == 1)
+    assert(r[2] == 2)
+    assert(r[3] == 3)
 }

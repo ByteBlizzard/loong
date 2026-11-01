@@ -1,5 +1,7 @@
 module loong.io
 
+depends loong.core
+
 external java "dev.loong.runtime.FileIo" {
     static function jReadText(path: String) -> Result<String, String> as "readText"
     static function jWriteText(path: String, text: String) -> Result<Unit, String> as "writeText"
@@ -17,9 +19,7 @@ external java "dev.loong.runtime.FileIo" {
 
 /// Fails the enclosing test when cond is false (v1 has no assert builtin).
 function require(cond: Bool) -> Unit {
-    if !cond {
-        let dead: Int = 1 / 0
-    }
+    assert(cond)
 }
 
 /// Reads the whole file as UTF-8 text; Err carries the failure message.
@@ -80,6 +80,37 @@ public function joinPath(a: String, b: String) -> String {
 /// The system temporary directory (home for tests and scratch files).
 public function tmpDir() -> String {
     return jTmpDir()
+}
+
+
+/// Splits text into lines: CRLF-safe, one trailing newline ignored.
+public function splitLines(text: String) -> Array<String> {
+    var t: String = text
+    if loong.core.ends(t, "\n") {
+        t = loong.core.sub(t, 0, loong.core.len(t) - 1)
+    }
+    let raw: Array<String> = loong.core.split(t, '\n')
+    let n: Int = loong.core.len(raw)
+    let out: Array<String> = newArray(n)
+    var i: Int = 0
+    while i < n {
+        let line: String = raw[i]
+        if loong.core.ends(line, "\r") {
+            out[i] = loong.core.sub(line, 0, loong.core.len(line) - 1)
+        } else {
+            out[i] = line
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Reads the file and returns its lines; Err carries the failure message.
+public function lines(path: String) -> Result<Array<String>, String> {
+    match readText(path: path) {
+        Result.Ok(text) => Result.Ok(splitLines(text))
+        Result.Err(e) => Result.Err(e)
+    }
 }
 
 test "readText" target: loong.io.readText {
@@ -240,4 +271,29 @@ test "joinPath" target: loong.io.joinPath {
 test "tmpDir" target: loong.io.tmpDir {
     let t: String = tmpDir()
     require(len(t) > 0)
+}
+
+test "splitLines" target: loong.io.splitLines {
+    let a: Array<String> = splitLines("one\ntwo\n")
+    assert(len(a) == 2)
+    assert(a[0] == "one")
+    assert(a[1] == "two")
+    let b: Array<String> = splitLines("x\r\ny")
+    assert(len(b) == 2)
+    assert(b[0] == "x")
+    assert(b[1] == "y")
+}
+
+test "lines" target: loong.io.lines {
+    let p: String = joinPath(tmpDir(), "loong-io-lines")
+    let w: Result<Unit, String> = writeText(p, "l1\nl2\nl3")
+    match lines(p) {
+        Result.Ok(ls) => {
+            assert(len(ls) == 3)
+            assert(ls[0] == "l1")
+            assert(ls[2] == "l3")
+        }
+        Result.Err(e) => assert(false)
+    }
+    let c: Result<Bool, String> = delete(p)
 }

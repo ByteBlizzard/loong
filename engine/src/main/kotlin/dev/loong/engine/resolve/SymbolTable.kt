@@ -84,7 +84,10 @@ object CoreSymbols {
     )
 
     /** 核心函数（短名直接可用）。 */
-    private val FUNCTIONS = listOf("send", "recv", "println", "print", "concat", "str", "len", "newArray", "to32", "to64", "tof")
+    private val FUNCTIONS = listOf(
+        "send", "recv", "println", "print", "concat", "str", "len", "newArray",
+        "to32", "to64", "tof", "assert",
+    )
 
     fun registerInto(symbols: SymbolTable) {
         VALUES.forEach { (rel, full) ->

@@ -6,9 +6,12 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.time.Duration
 
 /**
@@ -72,6 +75,57 @@ object DaemonCtl {
             ),
             StandardCharsets.UTF_8,
         )
+    }
+
+    // ---------- 同项目单实例锁 ----------
+
+    /** 启动锁句柄：channel 持锁至关闭（进程退出时 OS 兜底释放）。 */
+    class StartupLock internal constructor(
+        private val channel: FileChannel,
+        private val lock: FileLock,
+    ) {
+        fun release() {
+            runCatching { lock.release() }
+            runCatching { channel.close() }
+        }
+    }
+
+    private fun lockFile(projectDir: Path): Path = projectDir.resolve(".loongd.lock")
+
+    /**
+     * 跨进程互斥的启动锁：tryLock 失败 = 同项目已有 daemon 在启动/运行。
+     * 探活 + 二次探活只是竞态缓解（两个进程可能都在对方写端点前完成两轮探测），
+     * 文件锁才是硬保证——Windows 上 FileLock 同时独占文件，双开连锁文件都拿不到。
+     */
+    fun acquireStartupLock(projectDir: Path): StartupLock? = runCatching {
+        Files.createDirectories(projectDir)
+        val ch = FileChannel.open(
+            lockFile(projectDir),
+            StandardOpenOption.CREATE,
+            StandardOpenOption.WRITE,
+            StandardOpenOption.READ,
+        )
+        val fl = ch.tryLock()
+        if (fl == null) {
+            ch.close()
+            null
+        } else {
+            StartupLock(ch, fl)
+        }
+    }.getOrNull()
+
+    fun releaseStartupLock(lock: StartupLock?) {
+        lock?.release()
+    }
+
+    /** 拿不到锁时轮询等待持锁方就位（最长 20 秒；超时视为旧 daemon 残锁，报错退出）。 */
+    fun waitForWinner(projectDir: Path): Endpoint {
+        val deadline = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < deadline) {
+            probe(projectDir)?.let { return it }
+            Thread.sleep(200)
+        }
+        error("另一个 loong daemon 持有启动锁但 20 秒内未就绪：${lockFile(projectDir).toAbsolutePath()}（检查 daemon.log 或删除残留锁后重试）")
     }
 
     // ---------- 本机 daemon 索引（loong list 用） ----------

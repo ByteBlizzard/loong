@@ -45,6 +45,9 @@ class TypeChecker(
 
     private class Local(val type: LoongType, val mutable: Boolean)
 
+    /** 既可作语句又可作块值尾表达式的控制流节点（返回缺失检查需要全路径分析）。 */
+    private val CONTROL_FLOW_EXPRS = setOf(Kind.If, Kind.IfLet, Kind.Match)
+
     private val diags = ArrayList<Diagnostic>()
     private val structs = HashMap<String, StructInfo>()
     private val enums = HashMap<String, EnumInfo>()
@@ -223,6 +226,9 @@ class TypeChecker(
     /** Object = 互操作擦除形态：任何类型可显式收敛给它（调用点由 codegen 装箱）。 */
     private fun isObject(t: LoongType): Boolean = t is LoongType.Named && t.name == "Object" && t.args.isEmpty()
 
+    /** Any = 顶层类型（一切类型隐式实现）：实参位与 Object 同为擦除收敛。 */
+    private fun isErasedAny(t: LoongType): Boolean = t is LoongType.Named && t.name == "Any" && t.args.isEmpty()
+
     private fun validateTypeText(text: String, scopeParams: Set<String>, anchor: NodeId): LoongType? {
         var ok = true
         fun walk(t: LoongType) {
@@ -279,6 +285,62 @@ class TypeChecker(
         fnRet = validateTypeText(fs(fn, "return_type"), scope, fn) ?: UNIT
         val body = table[fn].kids.firstOrNull { table[it].kind == Kind.Block } ?: return
         checkBlock(body, fnRet)
+        checkMissingReturn(fn, body)
+    }
+
+    /**
+     * 非 Unit 函数的返回缺失检查（诊断期数据流，替代运行期 VerifyError）：
+     * - 尾表达式（ExprStmt）块值路径：类型已由 checkBlock 与返回类型比对——
+     *   唯一漏洞是控制流尾表达式类型为 Unit 时的豁免，此时要求全路径 return；
+     * - 语句收尾：要求全路径 return（显式 return / 双分支 if / 全臂 match / while true）。
+     * 此前这类函数诊断全绿、字节码在空栈上 areturn → 运行期 VerifyError。
+     */
+    private fun checkMissingReturn(fn: NodeId, body: NodeId) {
+        if (fnRet == UNIT) return
+        val stmts = table[body].kids
+        val last = stmts.lastOrNull()
+        val ok = when {
+            last == null -> false // 空函数体不可能产出非 Unit 返回值
+            table[last].kind == Kind.ExprStmt -> {
+                val expr = table[last].kids.firstOrNull()
+                when {
+                    expr == null -> false
+                    // 控制流尾表达式且其类型为 Unit（checkBlock 豁免比对）才需全路径 return；
+                    // 非 Unit 块值（如 match 表达式）已被 checkBlock 正常比对
+                    table[expr].kind in CONTROL_FLOW_EXPRS && exprTypes[expr] == UNIT ->
+                        definitelyReturns(expr)
+                    else -> true
+                }
+            }
+            else -> definitelyReturns(body)
+        }
+        if (!ok) {
+            diags += Diagnostic(
+                fn, Severity.Error, DiagCodes.E_MISSING_RETURN,
+                "function '${fs(fn, "name")}' can finish without returning ${fnRet.render()}; " +
+                    "add a return statement or a tail expression",
+            )
+        }
+    }
+
+    /** 语句/块是否在所有路径上 return（保守近似：显式 return、双分支 if、全臂 match、while true）。 */
+    private fun definitelyReturns(id: NodeId): Boolean {
+        val kids = table[id].kids
+        return when (table[id].kind) {
+            Kind.Block -> kids.any { definitelyReturns(it) }
+            Kind.Return -> true
+            Kind.If -> kids.size == 3 && definitelyReturns(kids[1]) && definitelyReturns(kids[2])
+            Kind.IfLet -> kids.size == 3 && definitelyReturns(kids[1]) && definitelyReturns(kids[2])
+            Kind.Match -> kids.size >= 2 &&
+                kids.drop(1).all { arm -> table[arm].kids.firstOrNull()?.let { definitelyReturns(it) } == true }
+            Kind.While -> isLiteralTrue(kids.getOrNull(0)) && definitelyReturns(kids[1])
+            else -> false
+        }
+    }
+
+    private fun isLiteralTrue(e: NodeId?): Boolean {
+        if (e == null || table[e].kind != Kind.Literal) return false
+        return fs(e, "lit_kind") == "bool" && fs(e, "value") == "true"
     }
 
     private fun checkTest(test: NodeId) {
@@ -915,6 +977,9 @@ class TypeChecker(
             "loong.core.tof" -> checkApply(e, listOf("v" to INT), emptySet(), FLOAT, null, args, expected)
             "loong.core.to32" -> checkApply(e, listOf("v" to INT), emptySet(), INT32, null, args, expected)
             "loong.core.to64" -> checkApply(e, listOf("v" to INT32), emptySet(), INT, null, args, expected)
+            "loong.core.assert" -> checkApply(
+                e, listOf("cond" to BOOL), emptySet(), UNIT, null, args, expected,
+            )
             "loong.core.len" -> {
                 if (args.size != 1) {
                     arity(e, 1, args.size)
@@ -1046,7 +1111,11 @@ class TypeChecker(
         val assigned = assignArgs(call, sig, args) ?: return UNIT
         for ((_, paramT, argNode) in assigned) {
             val actual = checkExpr(argExpr(argNode), applySubst(paramT, subst))
-            if (isObject(paramT)) continue // 擦除形参：任意实参可收敛（调用点装箱）
+            // 擦除形参：任意实参可收敛（调用点装箱）。Object 与 Any 同语义——
+            // Any 是顶层类型（grammar：一切类型隐式实现 Any），codegen 的 desc()
+            // 同样把 Any 擦除为 Object，此处对齐，否则 external 声明 Any 形参位
+            // 拒收 String 等一切具体类型（E_TYPE_MISMATCH 误报）。
+            if (isObject(paramT) || isErasedAny(paramT)) continue
             if (!unify(paramT, actual, subst, typeParams)) {
                 if (!isOpaqueInterfaceCall(actual, implBase)) {
                     mismatch(argNode, applySubst(paramT, subst), actual)

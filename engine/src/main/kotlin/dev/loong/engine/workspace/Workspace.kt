@@ -8,7 +8,9 @@ import dev.loong.engine.codegen.CodegenException
 import dev.loong.engine.diagnostics.Diagnostic
 import dev.loong.engine.diagnostics.Severity
 import dev.loong.engine.resolve.Resolver
+import dev.loong.engine.diagnostics.DiagCodes
 import dev.loong.engine.rules.RulesChecker
+import dev.loong.engine.rules.StructuralInvariants
 import dev.loong.engine.storage.LoongastCodec
 import dev.loong.engine.pkg.DepSource
 import dev.loong.engine.pkg.Externals
@@ -19,7 +21,7 @@ import dev.loong.engine.types.TypeChecker
 /** 单模块状态：AST（节点表）+ 最近一次重算的诊断与字节码。 */
 class ModuleState internal constructor(
     val name: String,
-    internal val table: NodeTable,
+    internal var table: NodeTable,
     internal val root: NodeId,
 ) {
     /** 解析期诊断（结构性的，编辑不消除）。 */
@@ -91,10 +93,21 @@ class Workspace(
     /** 全量装载（新建或整体替换一个模块）。 */
     fun load(source: String): ModuleState {
         val parsed = Parser(source).parse()
-        val name = (parsed.table[parsed.root].fields["name"] as? FieldValue.Str)?.value
+        return loadParsed(parsed.table, parsed.root, parsed.diagnostics)
+    }
+
+    /**
+     * 从已构建的节点表装载（结构化创建路径：调用方建好 Module 根与声明树，
+     * 无源码文本）。与 [load] 共享状态接入与重算。
+     */
+    fun loadTable(table: NodeTable, root: NodeId, parseDiagnostics: List<Diagnostic> = emptyList()): ModuleState =
+        loadParsed(table, root, parseDiagnostics)
+
+    private fun loadParsed(table: NodeTable, root: NodeId, parseDiagnostics: List<Diagnostic>): ModuleState {
+        val name = (table[root].fields["name"] as? FieldValue.Str)?.value
             ?: throw IllegalArgumentException("module has no name")
-        val m = ModuleState(name, parsed.table, parsed.root)
-        m.parseDiagnostics = parsed.diagnostics
+        val m = ModuleState(name, table, root)
+        m.parseDiagnostics = parseDiagnostics
         modules[name] = m
         recompute(m)
         return m
@@ -102,31 +115,69 @@ class Workspace(
 
     /**
      * 编辑操作：对模块节点表做变更（design §4.5 的 insert/replace/move/delete 等），
-     * 自动触发模块重算，返回重算后的诊断。操作必须是原子的——异常时不留半变更
-     * （NodeTable 编辑操作保证被拒绝的操作零副作用）。
+     * 自动触发模块重算，返回重算后的诊断。事务语义：
+     * - 操作异常 → 表未被触碰（NodeTable 编辑操作保证被拒绝的操作零副作用）；
+     * - 重算异常（内部已兜底，此处为终极防线）→ 回滚到编辑前快照再抛出——
+     *   绝不出现「响应崩溃但写入已生效」的认知分裂；
+     * - 重算成功但诊断有错（含 E_INVARIANT_VIOLATION）→ 写入保留（诊断驱动工作流）。
      */
     fun <T> edit(name: String, op: (NodeTable) -> T): EditOutcome<T> {
         val m = module(name)
+        val snapshot = m.table.snapshot()
         val value = op(m.table)
-        recompute(m)
+        try {
+            recompute(m)
+        } catch (e: Exception) {
+            m.table = snapshot
+            throw IllegalStateException(
+                "recompute crashed; edit rolled back (${e.javaClass.simpleName}: ${e.message})", e,
+            )
+        }
         return EditOutcome(value, m.diagnostics, m.revision)
     }
 
     internal fun recompute(m: ModuleState) {
         m.revision++
+        val prevClasses = m.classes
+        m.classes = emptyMap() // 任何失败路径都不留陈旧字节码（旧实现会静默保留上次产物）
         val diags = ArrayList<Diagnostic>(m.parseDiagnostics)
         diags += m.link?.diagnostics ?: emptyList()
-        diags += Resolver(m.table, m.link?.symbols).resolve(m.root)
-        val checker = TypeChecker(m.table, m.link?.externalRoots ?: emptyList())
-        diags += checker.check(m.root)
-        diags += RulesChecker(m.table).check(m.root)
-        extraChecks?.let { diags += it(m.table, m.root) }
+
+        // 结构门禁：违例节点点名报 E_INVARIANT_VIOLATION，跳过名字/类型/字节码
+        // 阶段——下游组件假设结构完好（裸索引 kids[0]/[1]），毒节点不再引发连环崩溃，
+        // 诊断也永远反映真实状态（修复路径 delete_node 始终可用）。
+        val structural = StructuralInvariants.check(m.table)
+        if (structural.isNotEmpty()) {
+            structural.forEach { (node, msg) ->
+                diags += Diagnostic(node, Severity.Error, DiagCodes.E_INVARIANT_VIOLATION, msg)
+            }
+            m.diagnostics = diags
+            return
+        }
+
+        var checker: TypeChecker? = null
+        try {
+            diags += Resolver(m.table, m.link?.symbols).resolve(m.root)
+            val c = TypeChecker(m.table, m.link?.externalRoots ?: emptyList())
+            checker = c
+            diags += c.check(m.root)
+            diags += RulesChecker(m.table).check(m.root)
+            extraChecks?.let { diags += it(m.table, m.root) }
+        } catch (e: Exception) {
+            diags += Diagnostic(
+                m.root, Severity.Error, DiagCodes.E_INVARIANT_VIOLATION,
+                "recompute aborted (${e.javaClass.simpleName}: ${e.message}); " +
+                    "the module keeps its previous shape diagnostics — inspect nodes above",
+            )
+            m.diagnostics = diags
+            return
+        }
         m.diagnostics = diags
+
         if (diags.none { it.severity == Severity.Error }) {
             try {
-                val prevClasses = m.classes
                 val gen = CodeGenerator(
-                    m.table, checker, m.link?.externals ?: Externals.EMPTY,
+                    m.table, checker!!, m.link?.externals ?: Externals.EMPTY,
                     previousClasses = prevClasses.ifEmpty { null },
                     previousSignatures = if (prevClasses.isEmpty()) null else m.fnSignatures,
                 )
@@ -138,9 +189,15 @@ class Workspace(
                     m.root, Severity.Error, "E_INTERNAL", "codegen failure: ${e.message}",
                 )
                 m.classes = emptyMap()
+            } catch (e: Exception) {
+                // 发射期校验（CheckMethodAdapter 数据流）抛的不是 CodegenException：
+                // 同样收敛为构建期诊断——VerifyError 从运行期提前到这里
+                m.diagnostics = diags + Diagnostic(
+                    m.root, Severity.Error, "E_INTERNAL",
+                    "codegen verification failed (${e.javaClass.simpleName}: ${e.message})",
+                )
+                m.classes = emptyMap()
             }
-        } else {
-            m.classes = emptyMap()
         }
     }
 

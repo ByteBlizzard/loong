@@ -16,10 +16,10 @@ kotlin {
 
 dependencies {
     api(libs.asm.core)
+    implementation(libs.asm.util)
     testImplementation(project(":runtime"))
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
-    testImplementation(libs.asm.util)
     testRuntimeOnly(libs.junit.launcher)
 }
 

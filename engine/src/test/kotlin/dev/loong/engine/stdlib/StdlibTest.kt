@@ -27,7 +27,7 @@ class StdlibTest {
         assertTrue(m.classes.isNotEmpty())
 
         val results = dev.loong.engine.testrunner.TestRunner(m.table, m.hostClassName).runTests(m.classes)
-        assertEquals(44, results.size)
+        assertEquals(47, results.size)
         assertTrue(results.all { it.passed }, results.joinToString { "${it.name}: ${it.error}" })
     }
 

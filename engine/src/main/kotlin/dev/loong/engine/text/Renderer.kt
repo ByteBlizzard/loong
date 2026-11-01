@@ -14,6 +14,11 @@ import dev.loong.engine.ast.NodeTable
  */
 class Renderer(private val table: NodeTable) {
 
+    private companion object {
+        /** 结构不完整节点的占位标记：渲染是视图层，永不抛异常——坏节点要能被看见才能被删掉。 */
+        const val INCOMPLETE = "<incomplete>"
+    }
+
     /**
      * 渲染任意节点的子树为代码（Web UI 原始 AST 树的「导出成代码」）：
      * 按 kind 分发到模块/声明/语句/表达式各自的渲染路径，深度归零。
@@ -50,7 +55,7 @@ class Renderer(private val table: NodeTable) {
     }
 
     private fun renderArmBody(arm: NodeId, depth: Int): String {
-        val body = n(arm).kids.first()
+        val body = n(arm).kids.firstOrNull() ?: return INCOMPLETE
         return if (n(body).kind == Kind.Block) renderBlock(body, depth) else renderExpr(body, depth)
     }
 
@@ -285,21 +290,23 @@ class Renderer(private val table: NodeTable) {
                 if (fb(id, "shared")) sb.append("shared ")
                 sb.append(if (fb(id, "mutable")) "var " else "let ")
                 sb.append(fs(id, "name")).append(": ").append(fs(id, "type")).append(" = ")
-                sb.append(renderExpr(n(id).kids.first(), depth))
+                sb.append(n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE)
             }
             Kind.Assign -> {
-                sb.append(renderExpr(n(id).kids[0], depth))
+                sb.append(n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE)
                     .append(" = ")
-                    .append(renderExpr(n(id).kids[1], depth))
+                    .append(n(id).kids.getOrNull(1)?.let { renderExpr(it, depth) } ?: INCOMPLETE)
             }
             Kind.While -> {
-                sb.append("while ").append(renderExpr(n(id).kids[0], depth)).append(" ")
-                    .append(renderBlock(n(id).kids[1], depth))
+                sb.append("while ")
+                    .append(n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE).append(" ")
+                    .append(n(id).kids.getOrNull(1)?.let { renderBlock(it, depth) } ?: "{ $INCOMPLETE }")
             }
             Kind.For -> {
                 sb.append("for ").append(fs(id, "var_name")).append(": ").append(fs(id, "var_type"))
-                    .append(" in ").append(renderExpr(n(id).kids[0], depth)).append(" ")
-                    .append(renderBlock(n(id).kids[1], depth))
+                    .append(" in ")
+                    .append(n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE).append(" ")
+                    .append(n(id).kids.getOrNull(1)?.let { renderBlock(it, depth) } ?: "{ $INCOMPLETE }")
             }
             Kind.Return -> {
                 sb.append("return")
@@ -310,7 +317,8 @@ class Renderer(private val table: NodeTable) {
             Kind.If -> sb.append(renderIfContent(id, depth))
             Kind.IfLet -> sb.append(renderIfLetContent(id, depth))
             Kind.Match -> sb.append(renderMatchContent(id, depth))
-            Kind.ExprStmt -> sb.append(renderExpr(n(id).kids.first(), depth))
+            Kind.ExprStmt ->
+                sb.append(n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE)
             else -> sb.append("// <unrenderable stmt: ").append(n(id).kind).append(">")
         }
         return sb.toString()
@@ -363,30 +371,34 @@ class Renderer(private val table: NodeTable) {
     private fun renderExpr(id: NodeId, depth: Int): String = when (n(id).kind) {
         Kind.Literal -> renderLiteral(id, depth)
         Kind.Path -> fs(id, "written")
-        Kind.FieldAccess -> renderReceiver(n(id).kids[0], depth) + "." + fs(id, "field")
-        Kind.Index -> renderReceiver(n(id).kids[0], depth) + "[" + renderExpr(n(id).kids[1], depth) + "]"
+        Kind.FieldAccess ->
+            (n(id).kids.getOrNull(0)?.let { renderReceiver(it, depth) } ?: INCOMPLETE) + "." + fs(id, "field")
+        Kind.Index ->
+            (n(id).kids.getOrNull(0)?.let { renderReceiver(it, depth) } ?: INCOMPLETE) +
+                "[" + (n(id).kids.getOrNull(1)?.let { renderExpr(it, depth) } ?: INCOMPLETE) + "]"
         Kind.Call -> {
-            val callee = renderReceiver(n(id).kids[0], depth)
+            val callee = n(id).kids.getOrNull(0)?.let { renderReceiver(it, depth) } ?: INCOMPLETE
             val args = n(id).kids.drop(1).joinToString(", ") { renderArg(it, depth) }
             "$callee($args)"
         }
         Kind.Arg -> renderArg(id, depth)
         Kind.Binary -> {
             val lvl = binLevel(fs(id, "op"))
-            renderOperand(n(id).kids[0], lvl, strict = false, depth) + " " + fs(id, "op") + " " +
-                renderOperand(n(id).kids[1], lvl, strict = true, depth)
+            (n(id).kids.getOrNull(0)?.let { renderOperand(it, lvl, strict = false, depth) } ?: INCOMPLETE) +
+                " " + fs(id, "op") + " " +
+                (n(id).kids.getOrNull(1)?.let { renderOperand(it, lvl, strict = true, depth) } ?: INCOMPLETE)
         }
         Kind.Unary -> {
-            val operand = n(id).kids[0]
+            val operand = n(id).kids.getOrNull(0) ?: return INCOMPLETE
             if (prec(operand) < 10) fs(id, "op") + "(" + renderExpr(operand, depth) + ")"
             else fs(id, "op") + renderExpr(operand, depth)
         }
         Kind.Join -> {
-            val operand = n(id).kids[0]
+            val operand = n(id).kids.getOrNull(0) ?: return INCOMPLETE
             if (prec(operand) < 11) "join (" + renderExpr(operand, depth) + ")"
             else "join " + renderExpr(operand, depth)
         }
-        Kind.Spawn -> "spawn " + renderExpr(n(id).kids[0], depth)
+        Kind.Spawn -> "spawn " + (n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE)
         Kind.If -> renderIfContent(id, depth)
         Kind.IfLet -> renderIfLetContent(id, depth)
         Kind.Match -> renderMatchContent(id, depth)
@@ -395,7 +407,7 @@ class Renderer(private val table: NodeTable) {
 
     private fun renderArg(id: NodeId, depth: Int): String {
         val name = n(id).fields["name"]
-        val value = renderExpr(n(id).kids.first(), depth)
+        val value = n(id).kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE
         return if (name is FieldValue.Str) name.value + ": " + value else value
     }
 
@@ -405,7 +417,8 @@ class Renderer(private val table: NodeTable) {
         "array" -> "[" + n(id).kids.joinToString(", ") { renderExpr(it, depth) } + "]"
         "map" -> {
             val entries = n(id).kids.joinToString(", ") {
-                renderExpr(n(it).kids[0], depth) + ": " + renderExpr(n(it).kids[1], depth)
+                (n(it).kids.getOrNull(0)?.let { k -> renderExpr(k, depth) } ?: INCOMPLETE) + ": " +
+                    (n(it).kids.getOrNull(1)?.let { v -> renderExpr(v, depth) } ?: INCOMPLETE)
             }
             if (n(id).kids.isEmpty()) "map { }" else "map { $entries }"
         }
@@ -415,8 +428,8 @@ class Renderer(private val table: NodeTable) {
     private fun renderIfContent(id: NodeId, depth: Int): String {
         val kids = n(id).kids
         val sb = StringBuilder("if ")
-            .append(renderExpr(kids[0], depth)).append(" ")
-            .append(renderBlock(kids[1], depth))
+            .append(kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE).append(" ")
+            .append(kids.getOrNull(1)?.let { renderBlock(it, depth) } ?: "{ $INCOMPLETE }")
         if (kids.size > 2) {
             sb.append(" else ")
             val els = kids[2]
@@ -432,8 +445,8 @@ class Renderer(private val table: NodeTable) {
         val sb = StringBuilder("if let ").append(fs(id, "path"))
         val binding = n(id).fields["binding"]
         if (binding is FieldValue.Str) sb.append("(").append(binding.value).append(")")
-        sb.append(" = ").append(renderExpr(kids[0], depth)).append(" ")
-            .append(renderBlock(kids[1], depth))
+        sb.append(" = ").append(kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE).append(" ")
+            .append(kids.getOrNull(1)?.let { renderBlock(it, depth) } ?: "{ $INCOMPLETE }")
         if (kids.size > 2) sb.append(" else ").append(renderBlock(kids[2], depth))
         return sb.toString()
     }
@@ -441,12 +454,16 @@ class Renderer(private val table: NodeTable) {
     private fun renderMatchContent(id: NodeId, depth: Int): String {
         val kids = n(id).kids
         val sb = StringBuilder("match ")
-            .append(renderExpr(kids[0], depth)).append(" {\n")
+            .append(kids.getOrNull(0)?.let { renderExpr(it, depth) } ?: INCOMPLETE).append(" {\n")
         for (arm in kids.drop(1)) {
             sb.append(indent(depth + 1)).append(renderPattern(arm)).append(" => ")
-            val body = n(arm).kids.first()
+            val body = n(arm).kids.firstOrNull()
             sb.append(
-                if (n(body).kind == Kind.Block) renderBlock(body, depth + 1) else renderExpr(body, depth + 1),
+                when {
+                    body == null -> INCOMPLETE
+                    n(body).kind == Kind.Block -> renderBlock(body, depth + 1)
+                    else -> renderExpr(body, depth + 1)
+                },
             )
             sb.append('\n')
         }

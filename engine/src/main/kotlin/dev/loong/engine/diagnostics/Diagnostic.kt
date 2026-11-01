@@ -39,6 +39,8 @@ object DiagCodes {
 
     // 类型检查
     const val E_TYPE_MISMATCH = "E_TYPE_MISMATCH"
+    const val E_MISSING_RETURN = "E_MISSING_RETURN"
+    const val E_INVARIANT_VIOLATION = "E_INVARIANT_VIOLATION"
     const val E_ARITY_MISMATCH = "E_ARITY_MISMATCH"
     const val E_NAMED_ARG_UNKNOWN = "E_NAMED_ARG_UNKNOWN"
     const val E_BAD_OPERAND_TYPE = "E_BAD_OPERAND_TYPE"

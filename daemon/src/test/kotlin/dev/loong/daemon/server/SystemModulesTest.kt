@@ -83,7 +83,7 @@ class SystemModulesTest {
             // 系统模块自身测试可跑（真实文件 IO）
             val (ts, tb) = post(port, "/modules/loong.io%2Fv1/test", "{}")
             assertEquals(200, ts, tb)
-            assertTrue("\"passed\":12" in tb, tb)
+            assertTrue("\"passed\":14" in tb, tb)
         }
     }
 

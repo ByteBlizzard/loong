@@ -6,6 +6,7 @@ import dev.loong.engine.ast.NodeId
 import dev.loong.engine.ast.NodeTable
 import dev.loong.engine.types.LoongType
 import dev.loong.engine.types.TypeChecker
+import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
@@ -92,7 +93,12 @@ class CodeGenerator(
         }
         val prevHost = previousClasses?.get(hostInternal)
 
-        val host = newWriter(hostInternal, "java/lang/Object", null)
+        // 增量拷贝路径：类头由 ClassReader 重放（emitHeader=false，visit 只能一次）；
+        // 全新发射路径（无 prevHost，或无可拷贝方法）：create 内直接落类头
+        val host = newWriter(
+            hostInternal, "java/lang/Object", null,
+            emitHeader = !(prevHost != null && keep.isNotEmpty()),
+        )
         var copied = 0
         if (prevHost != null && keep.isNotEmpty()) {
             org.objectweb.asm.ClassReader(prevHost).accept(
@@ -267,15 +273,47 @@ class CodeGenerator(
 
     // ---------- 类生成 ----------
 
-    private fun newWriter(internal: String, superName: String, interfaces: Array<String>?): ClassWriter =
-        object : ClassWriter(ClassWriter.COMPUTE_FRAMES) {
-            override fun getCommonSuperClass(t1: String, t2: String): String =
-                if (t1 == t2) t1 else "java/lang/Object"
-        }.apply {
-            visit(
-                Opcodes.V21, Opcodes.ACC_PUBLIC, internal, null, superName, interfaces,
-            )
+    /**
+     * 发射期校验的类写入器：所有 visit 经 CheckClassAdapter（checkDataFlow=true，
+     * 方法级基本栈模拟）再进真实 ClassWriter——空栈返回/栈形态错误在生成时即抛出，
+     * 而不是运行期 VerifyError。产物字节从 raw ClassWriter 取（COMPUTE_FRAMES 重算
+     * 在 toByteArray，与前置校验互补）。
+     */
+    private class VerifiedWriter private constructor(val raw: ClassWriter, gate: ClassVisitor) :
+        ClassVisitor(Opcodes.ASM9, gate) {
+
+        fun toByteArray(): ByteArray = raw.toByteArray()
+
+        companion object {
+            /**
+             * @param emitHeader false = 类头由调用方补（增量拷贝路径：ClassReader.accept
+             *   会重放 visit —— CheckClassAdapter 要求 visit 恰好一次）
+             */
+            fun create(
+                internal: String,
+                superName: String,
+                interfaces: Array<String>?,
+                emitHeader: Boolean = true,
+            ): VerifiedWriter {
+                val raw = object : ClassWriter(ClassWriter.COMPUTE_FRAMES) {
+                    override fun getCommonSuperClass(t1: String, t2: String): String =
+                        if (t1 == t2) t1 else "java/lang/Object"
+                }
+                val gate = org.objectweb.asm.util.CheckClassAdapter(raw, true)
+                if (emitHeader) {
+                    gate.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, internal, null, superName, interfaces)
+                }
+                return VerifiedWriter(raw, gate)
+            }
         }
+    }
+
+    private fun newWriter(
+        internal: String,
+        superName: String,
+        interfaces: Array<String>?,
+        emitHeader: Boolean = true,
+    ): VerifiedWriter = VerifiedWriter.create(internal, superName, interfaces, emitHeader)
 
     private fun paramTypes(fn: NodeId, subst: Map<String, LoongType>): List<LoongType> =
         table[fn].kids.filter { table[it].kind == Kind.Param }
@@ -288,7 +326,7 @@ class CodeGenerator(
         is LoongType.Func -> LoongType.Func(t.params.map { applySub(it, subst) }, applySub(t.ret, subst))
     }
 
-    private fun emitFunction(host: ClassWriter, fn: NodeId, key: String) {
+    private fun emitFunction(host: VerifiedWriter, fn: NodeId, key: String) {
         val params = paramTypes(fn, emptyMap())
         val ret = LoongType.parse(fs(fn, "return_type"))
         val mdesc = "(" + params.joinToString("") { desc(it) } + ")" + desc(ret)
@@ -309,7 +347,7 @@ class CodeGenerator(
     }
 
     /** Test 块 → 静态方法 `$test$<节点ID>`；TestRunner 反射调用，结果按节点 ID 索引。 */
-    private fun emitTestFunction(host: ClassWriter, test: NodeId) {
+    private fun emitTestFunction(host: VerifiedWriter, test: NodeId) {
         val mv = host.visitMethod(
             Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "\$test\$${test.value}", "()V", null, null,
         )
@@ -322,21 +360,30 @@ class CodeGenerator(
         mv.visitEnd()
     }
 
-    private fun emitMainBridge(host: ClassWriter, root: NodeId) {        val main = table[root].kids.firstOrNull {
+    private fun emitMainBridge(host: VerifiedWriter, root: NodeId) {        val main = table[root].kids.firstOrNull {
             table[it].kind == Kind.Function && fs(it, "name") == "main"
         } ?: return
-        if (paramTypes(main, emptyMap()).isNotEmpty()) return
+        val params = paramTypes(main, emptyMap())
+        // 带参入口：main(args: Array<String>) —— Array<T> 擦除为 Object[]，String[]
+        // 天然兼容，桥直接透传；其它形参形态无法映射 JVM 入口（保持旧行为：不生成桥）。
+        if (params.size > 1) return
+        val takesArgs = params.size == 1
+        if (takesArgs && !desc(params[0]).startsWith("[")) return
+        val loongMainDesc = "(" + params.joinToString("") { desc(it) } + ")V"
         val mv = host.visitMethod(
             Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null,
         )
         mv.visitCode()
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, hostInternal, "main", "()V", false)
+        if (takesArgs) {
+            mv.visitVarInsn(Opcodes.ALOAD, 0)
+        }
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, hostInternal, "main", loongMainDesc, false)
         mv.visitInsn(Opcodes.RETURN)
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
 
-    private fun emitConstants(host: ClassWriter, root: NodeId) {
+    private fun emitConstants(host: VerifiedWriter, root: NodeId) {
         val consts = table[root].kids.filter { table[it].kind == Kind.Const }
         if (consts.isEmpty() && variantSingletons.isEmpty()) return
         for (c in consts) {
@@ -1150,7 +1197,7 @@ class CodeGenerator(
             "int" -> mv.visitLdcInsn(parseLong(fs(e, "value")))
             "float" -> mv.visitLdcInsn(fs(e, "value").toDouble())
             "bool" -> mv.visitInsn(if (fs(e, "value") == "true") Opcodes.ICONST_1 else Opcodes.ICONST_0)
-            "string" -> mv.visitLdcInsn(fs(e, "value"))
+            "string" -> mv.visitLdcInsn(cookString(fs(e, "value")))
             "char" -> pushInt(mv, cookChar(fs(e, "value")).code)
             "array" -> {
                 val elemDesc = desc((tOf(e) as LoongType.Named).args[0])
@@ -1199,6 +1246,40 @@ class CodeGenerator(
         raw == "\\'" -> '\''
         raw.startsWith("\\u") -> raw.substring(2).toInt(16).toChar()
         else -> throw CodegenException("bad char literal '$raw'")
+    }
+
+    /**
+     * 字符串字面量反转义（Lexer 只校验不反转义——AST/渲染保持源文本形态，
+     * 运行期值在此统一烹制，与 char 字面量的 cookChar 对称）。
+     */
+    private fun cookString(raw: String): String {
+        if (!raw.contains('\\')) return raw
+        val sb = StringBuilder(raw.length)
+        var k = 0
+        while (k < raw.length) {
+            val ch = raw[k]
+            if (ch != '\\') {
+                sb.append(ch)
+                k++
+                continue
+            }
+            when (val e = raw.getOrNull(k + 1)) {
+                'n' -> { sb.append('\n'); k += 2 }
+                't' -> { sb.append('\t'); k += 2 }
+                'r' -> { sb.append('\r'); k += 2 }
+                '"' -> { sb.append('"'); k += 2 }
+                '\\' -> { sb.append('\\'); k += 2 }
+                'u' -> {
+                    val hex = raw.substring(k + 2, (k + 6).coerceAtMost(raw.length))
+                    val code = hex.toIntOrNull(16)
+                        ?: throw CodegenException("bad \\u escape in string literal")
+                    sb.append(code.toChar())
+                    k += 2 + hex.length
+                }
+                else -> throw CodegenException("bad escape '\\$e' in string literal")
+            }
+        }
+        return sb.toString()
     }
 
     private fun compilePath(e: NodeId, ctx: FnCtx) {
@@ -1388,6 +1469,25 @@ class CodeGenerator(
                 compileExpr(table[args[0]].kids.first(), ctx)
                 mv.visitInsn(Opcodes.L2I)
                 mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
+            }
+            "loong.core.assert" -> {
+                // assert(cond: Bool)：失败抛 AssertionError——测试运行器兜住记为该 test
+                // 失败；顶层执行则带消息终止。loong 无异常语法，这是唯一的失败报信内建。
+                val ordered = orderedArgs(listOf("cond"), args)
+                compileExpr(table[ordered[0]].kids.first(), ctx)
+                val ok = Label()
+                mv.visitJumpInsn(Opcodes.IFNE, ok)
+                mv.visitTypeInsn(Opcodes.NEW, "java/lang/AssertionError")
+                mv.visitInsn(Opcodes.DUP)
+                mv.visitLdcInsn("assertion failed")
+                mv.visitMethodInsn(
+                    Opcodes.INVOKESPECIAL, "java/lang/AssertionError", "<init>",
+                    // AssertionError(String) 是包私有；public 的是 (Object)——LDC 的
+                    // String 恰为 Object 兼容实参
+                    "(Ljava/lang/Object;)V", false,
+                )
+                mv.visitInsn(Opcodes.ATHROW)
+                mv.visitLabel(ok)
             }
             else -> throw CodegenException("unsupported builtin call ${fs(callee, "full_name")}")
         }

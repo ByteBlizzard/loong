@@ -47,9 +47,12 @@ class McpGuideTest {
         val init = s.request("initialize")
         val result = init.map["result"] as Json.Obj
 
-        // instructions 注入模型上下文：讲语言要点与工作法，而不只是工具名单
+        // instructions 注入模型上下文：讲语言要点与粗粒度工作法，而不只是工具名单
         val instructions = (result.map["instructions"] as Json.Str).v
-        for (marker in listOf("AST", "E_MISSING_DOC", "E_NO_TEST", "insert_node", "run_tests", "Option")) {
+        for (marker in listOf(
+            "AST", "E_MISSING_DOC", "E_NO_TEST", "run_tests", "Option",
+            "insert_tree", "replace_tree", "batch_edit", "点状微调", "不要拼源码文本",
+        )) {
             assertTrue(marker in instructions, "instructions missing: $marker")
         }
 
@@ -65,17 +68,32 @@ class McpGuideTest {
         val listed = s.request("prompts/list").map["result"].let { it as Json.Obj }
             .map["prompts"] as Json.Arr
         val names = listed.items.map { ((it as Json.Obj).map["name"] as Json.Str).v }
-        assertTrue(names.containsAll(listOf("write-function", "new-module", "fix-diagnostics")), names.toString())
+        assertTrue(
+            names.containsAll(listOf("write-function", "edit-in-bulk", "new-module", "fix-diagnostics")),
+            names.toString(),
+        )
 
-        // write-function 带参数渲染：逐步手册，含节点 kind/fields 示例与强制规则提示
+        // write-function 带参数渲染：粗粒度手册，含完整树模板与强制规则提示
         val got = s.request(
             "prompts/get",
             """{"name":"write-function","arguments":{"module":"demo.app/v1","name":"inc","returns":"Int"}}""",
         ).map["result"].let { it as Json.Obj }
         val text = (((got.map["messages"] as Json.Arr).items[0] as Json.Obj)
             .map["content"] as Json.Obj).let { (it.map["text"] as Json.Str).v }
-        for (marker in listOf("demo.app/v1", "inc", "kind\":\"Function", "DocComment", "E_NO_TEST", "run_tests")) {
+        for (marker in listOf(
+            "demo.app/v1", "inc", "insert_tree", "kind\":\"Function", "DocComment",
+            "kind\":\"Test", "E_NO_TEST", "run_tests", "trees[0]",
+        )) {
             assertTrue(marker in text, "write-function playbook missing: $marker")
+        }
+
+        // edit-in-bulk：批量组合手册
+        val bulk = s.request("prompts/get", """{"name":"edit-in-bulk","arguments":{"module":"demo.app/v1"}}""")
+            .map["result"].let { it as Json.Obj }
+        val bulkText = (((bulk.map["messages"] as Json.Arr).items[0] as Json.Obj)
+            .map["content"] as Json.Obj).let { (it.map["text"] as Json.Str).v }
+        for (marker in listOf("batch_edit", "replace_tree", "insert_tree", "失败语义", "字段合并")) {
+            assertTrue(marker in bulkText, "edit-in-bulk playbook missing: $marker")
         }
     }
 
@@ -151,9 +169,29 @@ class McpGuideTest {
         s.request("initialize")
         s.notify("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
         val tools = s.request("tools/list").map["result"].let { it as Json.Obj }.map["tools"] as Json.Arr
-        assertTrue(tools.items.size >= 19, "expected full tool surface")
-        val insert = tools.items.map { it as Json.Obj }
-            .first { (it.map["name"] as Json.Str).v == "insert_node" }
+        assertTrue(tools.items.size >= 22, "expected full tool surface")
+        val byName = tools.items.map { it as Json.Obj }
+            .associateBy { (it.map["name"] as Json.Str).v }
+
+        // 粗粒度工具在列，schema 齐全
+        for (name in listOf("insert_tree", "replace_tree", "batch_edit")) {
+            assertTrue(name in byName, "missing tool $name")
+        }
+        val tree = byName.getValue("insert_tree")
+        val treeProps = (tree.map["inputSchema"] as Json.Obj).map["properties"] as Json.Obj
+        for (key in listOf("module", "tree", "trees", "parent", "index")) {
+            assertTrue(key in treeProps.map, "insert_tree schema missing property: $key")
+        }
+        val batch = byName.getValue("batch_edit")
+        assertTrue(
+            ((batch.map["inputSchema"] as Json.Obj).map["required"] as Json.Arr).items
+                .map { (it as Json.Str).v }.containsAll(listOf("module", "ops")),
+        )
+        // 树工具描述教工作法（同构/整批拒绝/路径定位）
+        val treeDesc = (tree.map["description"] as Json.Str).v
+        assertTrue("同构" in treeDesc && "整批拒绝" in treeDesc, treeDesc)
+
+        val insert = byName.getValue("insert_node")
         val schema = insert.map["inputSchema"] as Json.Obj
         val props = schema.map["properties"] as Json.Obj
         for (key in listOf("module", "parent", "kind", "fields")) {
@@ -161,8 +199,8 @@ class McpGuideTest {
         }
         assertTrue((schema.map["required"] as Json.Arr).items
             .map { (it as Json.Str).v }.containsAll(listOf("module", "kind")))
-        // 描述里带用法要点（教怎么用，不只是是什么）
+        // 描述里带用法要点与定位（粗粒度优先，单节点仅微调）
         val desc = (insert.map["description"] as Json.Str).v
-        assertTrue("DocComment" in desc && "诊断" in desc, desc)
+        assertTrue("DocComment" in desc && "insert_tree" in desc, desc)
     }
 }

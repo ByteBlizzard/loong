@@ -49,12 +49,22 @@ internal object GuideContent {
         - 陷阱：loong 无异常——JDK 方法抛出的异常会直接终止进程；会抛异常的 API
           （文件/网络等）一律走 loong.io/loong.net 包装，不直调。手册见 loong://guide/interop。
 
-        标准工作流：get_module_interface（读渲染视图）→ insert_node / edit（响应自带诊断）
-        → 诊断清零 → run_tests → request_human_review（需要人类把关时）→ commit。
+        写代码的工作法（粗粒度优先，减少往返）：
+        - 新声明 / 大改 → insert_tree：一次提交整棵嵌套树（整个函数含 doc/参数/函数体，
+          配套 test 再一棵树）。树与 get_node 输出同构 {kind, fields, kids}；先校验后构建，
+          形态错误整批拒绝并给节点路径。模板见 prompt write-function。
+        - 重写整个函数/声明 → replace_tree（根 ID 不变）；多个改动点 → batch_edit
+          （一次提交多个树/节点操作，逐项报告）；新模块 → create_module 的 {module, trees}。
+        - insert_node / replace_node / move_node / delete_node 只做点状微调
+          （改一个字段、补一个节点、挪位置）——不要用它们逐节点搭声明。
+        - 你操作的是结构化节点，不要拼源码文本（文本入口是给人类的）。
 
-        深入阅读：prompts（write-function / new-module / fix-diagnostics 任务手册）与
-        resources（loong://guide/grammar 文法、loong://reference/ast-kinds 节点表、
-        loong://reference/diagnostics 诊断对照、loong://reference/stdlib 标准库清单、
+        标准工作流：get_module_interface（读现状）→ insert_tree / replace_tree / batch_edit
+        （响应自带重算诊断）→ 诊断清零 → run_tests → request_human_review（需把关时）→ commit。
+
+        深入阅读：prompts（write-function / edit-in-bulk / new-module / fix-diagnostics
+        任务手册）与 resources（loong://guide/grammar 文法、loong://reference/ast-kinds
+        节点表、loong://reference/diagnostics 诊断对照、loong://reference/stdlib 标准库清单、
         loong://guide/interop JVM 互操作手册、loong://examples/hello 示例）。
     """.trimIndent()
 
@@ -84,7 +94,7 @@ internal object GuideContent {
     val PROMPTS = listOf(
         Prompt(
             "write-function",
-            "在既有模块中新增一个函数并让测试通过——逐步节点操作手册（design §8.6 九步循环的函数版）",
+            "在既有模块中新增一个函数并让测试通过——粗粒度路径：一次 insert_tree 提交完整树",
             listOf(
                 PromptArg("module", "模块全名，如 demo.app/v1", true),
                 PromptArg("name", "函数名", true),
@@ -97,51 +107,105 @@ internal object GuideContent {
             val params = a["params"]?.takeIf { it.isNotBlank() } ?: ""
             val returns = arg(a, "returns")
             """
-            在模块 $module 中新增函数 $name 并让测试通过。按步骤逐个调用工具；
-            每步写操作的响应都自带最新诊断——跟着诊断走比一次写完更稳。
+            在模块 $module 中新增函数 $name 并让测试通过——粗粒度路径，一到两次调用完成。
 
             目标签名：function $name($params) -> $returns
 
-            1. 读当前结构
-               get_module_interface {"module":"$module"}
-               函数是 Module 根（id=1）的直接子节点，选好插入位置 index。
+            1. 读现状：get_module_interface {"module":"$module"}（确认无同名声明、选好位置；
+               缺省追加模块末尾即可）。
 
-            2. 插入函数骨架（此时报 E_MISSING_DOC 属预期）
-               insert_node {"module":"$module","parent":1,"index":<n>,"kind":"Function",
-                 "fields":{"name":"$name","visibility":"public","return_type":"$returns"}}
-               响应的 value 即新函数节点 id，下称 FID。
+            2. 一次 insert_tree 提交两棵树（函数 + 配套 test）。树与 get_node 输出同构
+               {kind, fields, kids}，fields 值 string/number/boolean/{"r":id}：
 
-            3. 补文档注释——必须是 FID 的第一个子节点（index 0）
-               insert_node {"module":"$module","parent":<FID>,"index":0,"kind":"DocComment",
-                 "fields":{"text":"<一句话英文描述>"}}
+               insert_tree {"module":"$module","trees":[
+                 {"kind":"Function","fields":{"name":"$name","visibility":"public","return_type":"$returns"},"kids":[
+                   {"kind":"DocComment","fields":{"text":"<一句话英文描述>"}},
+                   {"kind":"Param","fields":{"name":"x","type":"Int"}},
+                   {"kind":"Block","kids":[
+                     {"kind":"Return","kids":[
+                       {"kind":"Literal","fields":{"lit_kind":"int","value":"7"}}
+                     ]}
+                   ]}
+                 ]},
+                 {"kind":"Test","fields":{"name":"$name basic","target_name":"$module.$name"},"kids":[
+                   {"kind":"Block","kids":[
+                     {"kind":"ExprStmt","kids":[
+                       {"kind":"Call","kids":[
+                         {"kind":"Path","fields":{"written":"$name"}},
+                         {"kind":"Arg","fields":{"name":"x"},"kids":[
+                           {"kind":"Literal","fields":{"lit_kind":"int","value":"1"}}
+                         ]}
+                       ]}
+                     ]}
+                   ]}
+                 ]}
+               ]}
 
-            4. 逐个补参数（Param，index 依次 1, 2, ...）
-               insert_node {"module":"$module","parent":<FID>,"index":1,"kind":"Param",
-                 "fields":{"name":"x","type":"Int"}}
+               要点：DocComment 必须是函数第一个 kid；Param 并列多个；表达式可嵌套
+               Call/Binary/Unary/Literal/Path，if/match 也作表达式节点；块尾 ExprStmt 即块值。
+               响应回 ids（树根 ID）与重算诊断；树形态错误整批拒绝并给节点路径（trees[0].kids[1]），
+               按路径修正重发即可。
 
-            5. 补函数体
-               insert_node {"module":"$module","parent":<FID>,"index":<末位>,"kind":"Block","fields":{}}  → 记 BID
-               insert_node {"module":"$module","parent":<BID>,"index":0,"kind":"Return","fields":{}}      → 记 RID
-               insert_node {"module":"$module","parent":<RID>,"index":0,"kind":"Literal",
-                 "fields":{"lit_kind":"int","value":"7"}}
-               返回表达式也可以是 Call / Binary / Path：Call 的 kids = 被调 Path + Arg*；
-               具名实参在 Arg 的 fields 加 {"name":"x"}；函数体末位的 ExprStmt 即块值。
+            3. 按诊断迭代到清零，然后 run_tests {"module":"$module"}，绿了 commit。
+               速查：E_MISSING_DOC=树里补 DocComment 首位；E_NO_TEST=补 Test 树
+               （target_name=模块全名.函数名）；E_TYPE_MISMATCH=修字段类型文本或表达式；
+               E_UNKNOWN_NAME=名字拼错或缺依赖。完整对照见 fix-diagnostics 手册。
 
-            6. public 函数必须配 test（否则 E_NO_TEST）
-               insert_node {"module":"$module","parent":1,"index":<n>,"kind":"Test",
-                 "fields":{"name":"$name basic","target_name":"$module.$name"}}
-               target_name = 模块全名.函数名；再给 Test 挂一个 Block 子节点（可为空块）。
+            微调才下沉单节点工具：只改名 → replace_node（字段合并语义）；
+            改实现/签名 → replace_tree 整树重发（根 ID 不变）通常仍是最快的。
+            kind/fields 全表见 loong://reference/ast-kinds。
+            """.trimIndent()
+        },
+        Prompt(
+            "edit-in-bulk",
+            "批量与粗粒度操作手册：insert_tree / replace_tree / batch_edit 的选择与组合模式",
+            listOf(
+                PromptArg("module", "模块全名（示例用）", true),
+            ),
+        ) { a ->
+            val module = arg(a, "module")
+            """
+            粗粒度工具选择（都是结构化节点树，不写源码文本）：
+            - 成片新增（函数+test、struct+impl、external 块）→ insert_tree，trees 数组一次多棵
+            - 整函数/整声明重写（改签名、换实现、补 doc）→ replace_tree（根 ID 不变）
+            - 多个改动点 / 跨位置重构 / 删旧写新 → batch_edit（ops 顺序执行）
+            - 单字段、单节点、挪位置 → insert_node / replace_node / move_node / delete_node
 
-            7. run_tests {"module":"$module"} 全绿后 commit {"module":"$module","message":"add $name"}。
+            batch_edit 的 op 形态：
+              {"op":"insert_tree","trees":[...],"parent":1,"index":3}
+              {"op":"replace_tree","id":9,"tree":{...}}
+              {"op":"replace","id":9,"fields":{"name":"新名"}}   ← 字段合并：只改给出的键
+              {"op":"move","id":9,"newParent":1,"index":0}
+              {"op":"delete","id":9}
 
-            诊断速查：E_MISSING_DOC=补 DocComment 首子节点；E_NO_TEST=补 Test；
-            E_UNKNOWN_NAME=名字拼错或缺依赖；E_NOT_EXHAUSTIVE=match 补全分支或加 `_` 臂。
-            完整对照见 fix-diagnostics 手册与 loong://reference/diagnostics。
+            常用组合（一次调用完成一个意图，模块 $module）：
+            1. 重写函数、测试不受影响（test 按名字解析目标）：
+               batch_edit {"module":"$module","ops":[
+                 {"op":"replace_tree","id":<函数ID>,"tree":<新函数树>}
+               ]}
+            2. 删两个旧函数、一次补新函数与其测试：
+               batch_edit {"module":"$module","ops":[
+                 {"op":"delete","id":<旧函数1ID>},
+                 {"op":"delete","id":<旧函数2ID>},
+                 {"op":"insert_tree","trees":[<函数树>,<测试树>]}
+               ]}
+            3. 多点重命名字段同步（字段合并语义，多点一次提交）：
+               batch_edit {"module":"$module","ops":[
+                 {"op":"replace","id":<函数ID>,"fields":{"name":"新名"}},
+                 {"op":"replace","id":<测试ID>,"fields":{"target_name":"$module.新名"}}
+               ]}
+
+            失败语义：ops 逐项执行逐项报告，单项失败不影响其余——看 results[i].ok/error，
+            只重发失败项。树形态错误（坏 kind / 坏字段值 / ref 指向不存在节点）在单棵树内
+            整批拒绝零副作用，错误带节点路径（如 trees[0].kids[1].fields.x）。
+
+            新模块：create_module {"module":"org.example.foo/v1","trees":[<顶层声明树>...]}；
+            source 文本形态是给人类/导入用的，agent 不要用。
             """.trimIndent()
         },
         Prompt(
             "new-module",
-            "规划一个新模块：命名规范（ADR-0001）+ 最小可用脚手架 + 已预置模块说明",
+            "规划一个新模块：命名规范（ADR-0001）+ 结构化创建（{module, trees}）+ 已预置模块说明",
             listOf(PromptArg("name", "拟采用的模块全名，如 org.example.http", true)),
         ) { a ->
             val name = arg(a, "name")
@@ -151,26 +215,39 @@ internal object GuideContent {
             命名规范（ADR-0001）：反向域名 org.example.foo，全小写；
             主版本作路径段（org.example.http/v2），省略 = /v1；loong.* 为官方保留前缀，第三方不得使用。
 
-            装载路径：调用 create_module 工具提交整段模块文本（整模块装卸的唯一工具面入口）；
-            装载后你再用节点工具增量修改。注意：新项目已预置 main（hello 入口）与
-            example（语言能力样板）两个模块——多数任务直接在既有模块上加函数即可
-            （见 write-function 手册）；不再需要的模块用 delete_module 卸载（不可恢复）。
+            装载路径：create_module 的结构化形态——一次提交顶层声明树数组：
 
-            最小可用模块文本（与渲染视图同构，直接作 create_module 的 source）：
+            create_module {"module":"$name","trees":[
+              {"kind":"Depends","fields":{"module_name":"loong.io","source":"registry"}},
+              {"kind":"Function","fields":{"name":"greet","visibility":"public","return_type":"String"},"kids":[
+                {"kind":"DocComment","fields":{"text":"Greets the caller by name."}},
+                {"kind":"Param","fields":{"name":"who","type":"String"}},
+                {"kind":"Block","kids":[
+                  {"kind":"Return","kids":[{"kind":"Path","fields":{"written":"who"}}]}
+                ]}
+              ]},
+              {"kind":"Test","fields":{"name":"greet","target_name":"$name.greet"},"kids":[
+                {"kind":"Block","kids":[
+                  {"kind":"ExprStmt","kids":[
+                    {"kind":"Call","kids":[
+                      {"kind":"Path","fields":{"written":"greet"}},
+                      {"kind":"Arg","fields":{"name":"who"},"kids":[
+                        {"kind":"Literal","fields":{"lit_kind":"string","value":"loong"}}
+                      ]}
+                    ]}
+                  ]}
+                ]}
+              ]}
+            ]}
 
-            module $name
+            装载后用 insert_tree / replace_tree / batch_edit 增量演进。
+            注意：新项目已预置 main（hello 入口）与 example（语言能力样板）两个模块——
+            多数任务直接在既有模块上加声明即可（见 write-function 手册）；
+            不再需要的模块用 delete_module 卸载（不可恢复）。
+            create_module 的 source 源码文本形态是给人类/导入用的（Web UI、CLI 文件），agent 不要用。
 
-            /// Greets the caller by name.
-            public function greet(who: String) -> String {
-                return who
-            }
-
-            test "greet" target: $name.greet {
-                let r: String = greet(who: "loong")
-            }
-
-            纪律提醒：每个声明前有 ///；public 函数必有 test；struct 的每个字段、
-            interface 的每个方法签名也各需 ///（E_MISSING_DOC 一视同仁）。
+            纪律提醒：每个声明带 DocComment 首子节点；public 函数必有 test；
+            struct 的每个字段、interface 的每个方法签名也各需 ///（E_MISSING_DOC 一视同仁）。
             """.trimIndent()
         },
         Prompt(
@@ -260,12 +337,13 @@ internal object GuideContent {
             - 调用：`f(x: 1)` 具名实参优先；数组 `[1, 2, 3]`；下标 `xs[0]`。
             - 输出：`println("text")`（内建，参数须为 String，数字用 `str(n)` 转）。
 
-            ## 工作流（每一步响应自带诊断）
+            ## 工作流（粗粒度优先；每步写响应自带诊断）
 
-            list_modules（看现状）→ create_module（新模块；既有模块跳过）
-            → get_module_interface → insert_node/replace_node/delete_node（增量改 AST）
-            → 诊断清零 → run_tests → request_human_review（按需）→ commit
-            → build_project（按需：打包成可运行 jar）。
+            list_modules（看现状）→ create_module {module, trees}（新模块；既有模块跳过）
+            → get_module_interface（读现状）→ insert_tree / replace_tree / batch_edit
+            （整函数、整批改动一次提交）→ 诊断清零 → run_tests
+            → request_human_review（按需）→ commit → build_project（按需：打包 jar）。
+            insert_node 等单节点工具只做点状微调。
 
             更多：loong://guide/grammar（文法）、loong://reference/ast-kinds（节点表）、
             loong://examples/hello（完整示例）。
@@ -400,17 +478,40 @@ internal object GuideContent {
             | Spawn | — | Call |
             | Join | — | Handle 表达式 |
 
-            ## 编辑操作（insert_node / replace_node / move_node / delete_node 的底层语义）
+            ## 编辑操作（工具语义）
+
+            粗粒度主路径（树形态 = {kind, fields, kids}，与本表同构；fields 值
+            string/number/boolean/{"r":id}）：
 
             | 操作 | 语义 |
             |---|---|
-            | insert(parent, index, kind, fields) | 创建并挂接为 parent 第 index 个子节点，返回新 id |
-            | replace(id, fields?, kids?) | 原地改字段；给 kids 则旧子树整体删除、新 kids 替换 |
-            | move(id, newParent, index) | 换位（禁止移入自身子树） |
-            | delete(id) | 整棵子树移出，id 永不复用 |
+            | insert_tree {tree 或 trees, parent?, index?} | 一次写入一棵/多棵兄弟子树（整函数+test 等）；先逐节点校验，形态错误整批拒绝并回节点路径（trees[0].kids[1]），零副作用 |
+            | replace_tree {id, tree} | 整棵子树原位重写：id 变为 tree 根的形态，根 ID 不变（引用不漂移） |
+            | batch_edit {ops} | 多操作一次提交（op ∈ insert_tree/replace_tree/move/delete/replace），逐项执行逐项报告，单项失败不影响其余 |
+            | create_module {module, trees} | 结构化建模块（顶层声明树数组）；{source} 文本形态为人类/导入保留 |
 
-            ## 关键不变量（违反 = E_INVARIANT_VIOLATION）
+            单节点微调（点状改动用）：
 
+            | 操作 | 语义 |
+            |---|---|
+            | insert_node(parent, index, kind, fields) | 创建并挂接为 parent 第 index 个子节点，返回新 id |
+            | replace_node(id, fields?, kids?) | 字段合并（只改给出的键）；给 kids 则旧子树整体删除、新 kids（游离 ID）替换 |
+            | move_node(id, newParent, index) | 换位（禁止移入自身子树） |
+            | delete_node(id) | 整棵子树移出，id 永不复用 |
+
+            ## 关键不变量（违反 = 写入整批拒绝 / E_INVARIANT_VIOLATION）
+
+            本表的 kids 列即结构不变量（数量与槽位一并强制）——机器可查版用
+            **list_ast_kinds 工具**（同一张表，含每个 kind 的 kids 约束文本），
+            审计坏节点用 find_nodes broken=true。高频陷阱明文：
+
+            - **else 只认 If 的第 3 槽**（Block 或链式 If）；给 If 挂第 4 个 kid、
+              或把语句挂到 If/While 直接子位都会被拒绝——语句进 Block。
+            - **While/For 的 kids 恰两个**：[条件, Block]。循环体语句挂 Block 里，
+              不是 While 的直接 kid（多挂的节点不渲染不编译，等于静默丢代码）。
+            - Binary/Assign/Index/MapEntry 恰两个 kid；Unary/Join/FieldAccess/Spawn 恰一个；
+              Let/Arg/ExprStmt 恰一个；MatchArm 体恰一个 kid 且为 Block 或表达式
+              （Return 等语句须包在 Block 里）。
             - DocComment 若存在必须是声明的**第一个子节点**（E_MISSING_DOC 检查的就是它）。
             - 点链 `a.b.c` 是单个 Path（written="a.b.c"）；FieldAccess 仅当接收者不是 Path。
             - 块值 = 末位子节点恰为 ExprStmt 时的其表达式，无尾表达式则块值为 Unit。
@@ -452,6 +553,7 @@ internal object GuideContent {
             | 代码 | 触发 | 修复 |
             |---|---|---|
             | E_TYPE_MISMATCH | 期望/实际不一致（含分支不同型、return 不符、实参不符） | 对齐表达式与注解 |
+            | E_MISSING_RETURN | 非 Unit 函数存在走到底的路径（无 return 也无块尾尾表达式） | 补 return 语句或块尾尾表达式；控制流尾表达式需全分支 return |
             | E_ARITY_MISMATCH | 实参数不符 | 增删 Arg |
             | E_NAMED_ARG_UNKNOWN | 具名实参不在签名 | 核对 Param 名 |
             | E_BAD_OPERAND_TYPE | 操作数类型不支持运算符 | 无重载——换类型或改函数调用 |
@@ -479,8 +581,8 @@ internal object GuideContent {
             | 代码 | 触发 |
             |---|---|
             | E_EXTERNAL_CLASS_NOT_FOUND / E_EXTERNAL_METHOD_NOT_FOUND / E_EXTERNAL_DESCRIPTOR_MISMATCH | external 声明与目标类/方法/描述符不符 |
-            | E_INVARIANT_VIOLATION | 节点表不变量被破坏（工具链缺陷，非你的错误） |
-            | E_INTERNAL | 引擎内部错误（附追踪信息） |
+            | E_INVARIANT_VIOLATION | 节点结构不变量被破坏（kids 数量/槽位不符，如 Binary 缺操作数、else 槽不是 Block/If）；树写入会在入口整批拒绝，此诊断见于细粒度 insert_node 的半成品节点 | find_nodes broken=true 找到节点 → delete_node 删除或补齐子节点 |
+            | E_INTERNAL | 引擎内部错误（附追踪信息；含 codegen 数据流校验失败——生成字节码未通过构建期验证） |
             """.trimIndent(),
         ),
         Resource(
@@ -507,7 +609,10 @@ internal object GuideContent {
             Option：`unwrapOr(o, def)`、`isSome(o)`、`mapOpt(o, f)`；
             Result：`unwrapOrOk(r, def)`、`isOk(r)`、`mapOk(r, f)`。
             字符串：`at(s, i)`、`sub(s, from, until)`、`find(s, w)`、`upper(s)`、`lower(s)`、
-            `charStr(c)`、`empty(s)`、`starts(s, p)`、`ends(s, p)`、`trimmed(s)`。
+            `charStr(c)`、`empty(s)`、`starts(s, p)`、`ends(s, p)`、`trimmed(s)`、
+            `split(s: String, sep: Char) -> Array<String>`（保留空段，含尾段）、
+            `joinWith(xs: Array<String>, sep: String) -> String`（join 是保留字，故此名）。
+            排序：`sort(xs: Array<Int>) -> Array<Int>`（原位升序，返回同一数组）。
             字符判定：`isDigit`、`isLetter`、`isSpace`、`isUpper`、`isLower`、`toUpper(c)`、`toLower(c)`。
 
             ## loong.io — 文件 I/O（UTF-8 文本语义；Err 载荷 = 错误消息）
@@ -526,6 +631,8 @@ internal object GuideContent {
             | move | `(from: String, to: String) -> Result<Unit, String>` | 移动/重命名（目标存在先删） |
             | joinPath | `(a: String, b: String) -> String` | 平台正确的路径拼接 |
             | tmpDir | `() -> String` | 系统临时目录 |
+            | splitLines | `(text: String) -> Array<String>` | 按行拆分（CRLF 安全，末尾单个换行忽略） |
+            | lines | `(path: String) -> Result<Array<String>, String>` | 读文件并按行返回 |
 
             ## loong.net — HTTP 与 TCP（阻塞式：并发用 spawn；Err 载荷 = 错误消息）
 
@@ -540,7 +647,9 @@ internal object GuideContent {
             `connClose(c) -> Unit`。文本一律 UTF-8（v1 限制，暂无字节级 API）。
 
             内建函数（无需依赖）：println / print / concat / str / len / newArray / to32 / to64 /
-            tof / send / recv。错误处理模式：
+            tof / send / recv / **assert**（`assert(cond: Bool)`——失败抛 AssertionError：
+            测试中记为该 test 失败，顶层执行带消息终止；测试断言用它，不要用除零 trick）。
+            错误处理模式：
 
             ```
             match loong.io.readText(path: "cfg.txt") {

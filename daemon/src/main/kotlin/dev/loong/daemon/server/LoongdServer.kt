@@ -84,6 +84,10 @@ class LoongdServer(
     private val reviews = LinkedHashMap<Long, Review>()
     private var nextReviewId = 1L
 
+    // 链接脏标记：必须先于 init 块声明——Kotlin 按声明序初始化，init 里的
+    // relinkAll 会触碰它（曾因声明在后导致启动接线 NPE 被静默吞掉）。
+    private val linkDirty = LinkedHashSet<String>()
+
     init {
         // 崩溃恢复：启动时装载上次快照并重算（系统模块不持久化，恢复后再补装）
         runCatching { storage.load() }.getOrNull()?.let {
@@ -91,9 +95,14 @@ class LoongdServer(
         }
         // 空项目初始化：恢复后仍无任何模块 → 装载缺省的 main 与 example
         DefaultModules.seedIfEmpty(workspace)
-        // 系统模块（loong.core/io/net，daemon 内置资源）装载并接线 depends 解析
+        // 系统模块（loong.core/io/net，daemon 内置资源）装载并接线 depends 解析。
+        // 链接失败不能带崩启动，但必须留下痕迹——静默吞掉会把可修的接线问题
+        // 变成「模块永远 E_UNKNOWN_NAME」的谜团。
         SystemModules.ensureLoaded(workspace)
-        runCatching { relinkAll() }
+        runCatching { relinkAll() }.onFailure { e ->
+            System.err.println("loongd: startup relink failed: ${e.javaClass.simpleName}: ${e.message}")
+            e.printStackTrace()
+        }
         http.executor = Executors.newCachedThreadPool { r ->
             Thread(r, "loongd-http").apply { isDaemon = true }
         }
@@ -131,7 +140,17 @@ class LoongdServer(
                     serveConsole(ex)
 
                 method == "GET" && path == "/health" ->
-                    respondJson(ex, 200, mapOf("ok" to true, "version" to Loongd.VERSION))
+                    // 带进程标识：本机多 daemon 并存时可定位连的是哪一个
+                    respondJson(
+                        ex, 200,
+                        mapOf(
+                            "ok" to true,
+                            "version" to Loongd.VERSION,
+                            "pid" to ProcessHandle.current().pid(),
+                            "port" to port(),
+                            "projectDir" to dbRoot.parent.toString(),
+                        ),
+                    )
 
                 method == "GET" && path == "/mcp/status" -> {
                     val idleMs = System.currentTimeMillis() - lastMcpActivity
@@ -186,19 +205,40 @@ class LoongdServer(
                 }
 
                 method == "POST" && path == "/modules" -> mutate(ex) { body ->
-                    val src = bodyString(body, "source")
-                    val declared = SystemModules.declaredName(src)
-                    check(declared == null || !SystemModules.isSystem(declared)) {
-                        "system module '$declared' is built-in and cannot be replaced"
+                    if (body.map.containsKey("trees")) {
+                        // 结构化创建（agent 主路径）：{module, trees} —— 无源码文本，
+                        // 树先校验后构建，任何形态错误整批拒绝零副作用
+                        val moduleName = normalizeModuleName(bodyString(body, "module"))
+                        check(!SystemModules.isSystem(moduleName)) {
+                            "system module '$moduleName' is built-in and cannot be replaced"
+                        }
+                        val trees = (body.map["trees"] as? Json.Arr)?.items
+                            ?.map { it as? Json.Obj ?: error("each tree must be an object") }
+                            ?: emptyList()
+                        val m = loadStructured(moduleName, trees)
+                        relinkAll()
+                        noteMutation()
+                        mapOf(
+                            "module" to m.name,
+                            "revision" to m.revision,
+                            "diagnostics" to diagnosticsJson(m.diagnostics),
+                        )
+                    } else {
+                        // 源码文本形态（人类 / Web UI / CLI 文件导入；兼容保留）
+                        val src = bodyString(body, "source")
+                        val declared = SystemModules.declaredName(src)
+                        check(declared == null || !SystemModules.isSystem(declared)) {
+                            "system module '$declared' is built-in and cannot be replaced"
+                        }
+                        val m = workspace.load(src)
+                        relinkAll()
+                        noteMutation()
+                        mapOf(
+                            "module" to m.name,
+                            "revision" to m.revision,
+                            "diagnostics" to diagnosticsJson(m.diagnostics),
+                        )
                     }
-                    val m = workspace.load(src)
-                    relinkAll()
-                    noteMutation()
-                    mapOf(
-                        "module" to m.name,
-                        "revision" to m.revision,
-                        "diagnostics" to diagnosticsJson(m.diagnostics),
-                    )
                 }
 
                 method == "GET" && path == "/events" -> {
@@ -340,12 +380,19 @@ class LoongdServer(
             }
 
             method == "GET" && segments.size == 2 && segments[1] == "nodes" -> {
-                val kind = ex.requestURI.rawQuery?.let { q ->
-                    q.split('&').firstOrNull { it.startsWith("kind=") }?.removePrefix("kind=")
-                }
+                val query = (ex.requestURI.rawQuery ?: "").split('&')
+                val kind = query.firstOrNull { it.startsWith("kind=") }?.removePrefix("kind=")
+                val brokenOnly = query.any { it == "broken=true" }
                 val t = workspace.tableOf(name)
-                val nodes = t.find(kind?.let { k -> Kind.entries.firstOrNull { it.name == k } })
-                    .map { mapOf("id" to it.value, "kind" to t[it].kind.name) }
+                val nodes = if (brokenOnly) {
+                    // 结构异常审计：kids 数量/槽位违例的节点点名（配 delete_node 修复）
+                    dev.loong.engine.rules.StructuralInvariants.check(t).map { (id, problem) ->
+                        mapOf("id" to id.value, "kind" to t[id].kind.name, "problem" to problem)
+                    }
+                } else {
+                    t.find(kind?.let { k -> Kind.entries.firstOrNull { it.name == k } })
+                        .map { mapOf("id" to it.value, "kind" to t[it].kind.name) }
+                }
                 respondJson(ex, 200, mapOf("nodes" to nodes))
             }
 
@@ -400,6 +447,57 @@ class LoongdServer(
                 )
             }
 
+            // 嵌套节点树一次写入（粗粒度）：给 parent/index = 插入（tree 或 trees 多棵兄弟）；
+            // 给 id = 整棵子树原位重写（根 ID 保留）。树形态与 get_node 同构，先校验后构建。
+            method == "POST" && segments.size == 2 && segments[1] == "tree" -> mutate(ex, mapOf("module" to name)) { body ->
+                val depsBefore = dependsNames(name)
+                val op = run {
+                    val merged = linkedMapOf<String, Json.Value>()
+                    merged["op"] = Json.Str(if (body.map.containsKey("id")) "replace_tree" else "insert_tree")
+                    merged.putAll(body.map)
+                    Json.Obj(merged)
+                }
+                val ids = workspace.edit(name) { t -> applyTreeOp(t, op) }.value
+                markLinkDirty(name, selfDirty = dependsNames(name) != depsBefore)
+                relinkDirty()
+                noteMutation()
+                val fresh = workspace.module(name)
+                mapOf(
+                    "ids" to ids,
+                    "revision" to fresh.revision,
+                    "diagnostics" to diagnosticsJson(fresh.diagnostics),
+                )
+            }
+
+            // 批量编辑：一次提交多个树/节点操作，逐项执行逐项报告（单项失败不影响其余）。
+            method == "POST" && segments.size == 2 && segments[1] == "batch" -> mutate(ex, mapOf("module" to name)) { body ->
+                val ops = (body.map["ops"] as? Json.Arr)?.items
+                    ?.map { it as? Json.Obj ?: error("each op must be an object") }
+                    ?: error("batch requires 'ops' array")
+                val depsBefore = dependsNames(name)
+                val outcome = workspace.edit(name) { t ->
+                    ops.mapIndexed { i, op ->
+                        try {
+                            mapOf("i" to i, "ok" to true, "value" to applyTreeOp(t, op))
+                        } catch (e: Exception) {
+                            mapOf("i" to i, "ok" to false, "error" to (e.message ?: e.toString()))
+                        }
+                    }
+                }
+                val results = outcome.value
+                markLinkDirty(name, selfDirty = dependsNames(name) != depsBefore)
+                relinkDirty()
+                noteMutation()
+                val fresh = workspace.module(name)
+                mapOf(
+                    "results" to results,
+                    "applied" to results.count { it["ok"] == true },
+                    "failed" to results.count { it["ok"] != true },
+                    "revision" to fresh.revision,
+                    "diagnostics" to diagnosticsJson(fresh.diagnostics),
+                )
+            }
+
             method == "POST" && segments.size == 2 && segments[1] == "publish" -> mutate(ex, mapOf("module" to name)) { body ->
                 val version = ((body.map["version"] as? Json.Str)?.v)
                     ?: error("version required (x.y.z)")
@@ -434,6 +532,20 @@ class LoongdServer(
                     ex, 200,
                     mapOf(
                         "commits" to log.mapIndexed { i, (label, _) -> mapOf("id" to (i + 1), "message" to label) },
+                    ),
+                )
+            }
+
+            // 未提交改动：当前渲染 vs 最近一次 commit（无 commit 则 vs 空基线）
+            method == "GET" && segments.size == 3 && segments[1] == "diff" && segments[2] == "uncommitted" -> {
+                val log = history[name] ?: emptyList()
+                val prev = log.lastOrNull()?.second ?: ""
+                val cur = Renderer(workspace.tableOf(name)).render(workspace.rootOf(name))
+                respondJson(
+                    ex, 200,
+                    mapOf(
+                        "base" to (log.size.takeIf { it > 0 }?.let { "commit $it" } ?: "initial"),
+                        "diff" to textDiff(prev, cur),
                     ),
                 )
             }
@@ -526,11 +638,159 @@ class LoongdServer(
             "replace" -> {
                 val kids = (body.map["kids"] as? Json.Arr)?.items
                     ?.map { NodeId((it as Json.Str).v.toLong()) }
-                t.replace(id("id"), fields().ifEmpty { null }, kids).map { it.value }
+                // fields 为合并语义（与 replace_node 工具描述一致：可只给要改的键）；
+                // 给 kids 则整组子节点替换（NodeTable.replace 自身语义）
+                val f = fields()
+                val target = id("id")
+                val merged: Map<String, FieldValue>? =
+                    if (f.isEmpty()) null else (t.getOrNull(target)?.fields?.plus(f) ?: f)
+                t.replace(target, merged, kids).map { it.value }
             }
             "move" -> t.move(id("id"), id("newParent"), index()).map { it.value }
             "delete" -> t.delete(id("id")).map { it.value }
             else -> error("unknown edit op '$op'")
+        }
+    }
+
+    // ---------- 嵌套节点树（粗粒度写入，读写与 get_node 同构） ----------
+
+    /** 树形态错误：附节点路径（如 trees[0].kids[1].fields.x），整批拒绝零副作用。 */
+    private class TreeShapeException(path: String, reason: String) :
+        RuntimeException("$path: $reason")
+
+    /**
+     * 纯校验（不触碰节点表）：kind 合法、fields 值形态（str/num/bool/{"r":id}，
+     * ref 必须指向目标表现存节点）、**结构不变量**（kids 数量与容器槽位，
+     * 与重算门禁/文档同一张表）、kids 递归。任何失败抛 [TreeShapeException]。
+     * 构建期（[buildTree]）在此之后执行，形态上不可能再失败——两阶段保证
+     * 「校验失败零副作用」（不会留下半建的游离子树）。
+     */
+    private fun validateTree(t: NodeTable, node: Json.Obj, path: String) {
+        val kindName = (node.map["kind"] as? Json.Str)?.v
+            ?: throw TreeShapeException(path, "missing 'kind'")
+        val kind = Kind.entries.firstOrNull { it.name == kindName }
+            ?: throw TreeShapeException(path, "unknown kind '$kindName'")
+        treeFieldsOf(t, node, path)
+        val kidObjs = (node.map["kids"] as? Json.Arr)?.items
+            ?: emptyList()
+        kidObjs.forEachIndexed { i, kid ->
+            val obj = kid as? Json.Obj
+                ?: throw TreeShapeException("$path.kids[$i]", "kid must be a node object")
+        }
+        val litKind = (node.map["fields"] as? Json.Obj)
+            ?.map?.get("lit_kind")?.let { (it as? Json.Str)?.v }
+        val kidKinds = kidObjs.map { kid ->
+            val kn = ((kid as Json.Obj).map["kind"] as? Json.Str)?.v
+                ?: throw TreeShapeException(path, "kid must have a 'kind'")
+            Kind.entries.firstOrNull { it.name == kn }
+                ?: throw TreeShapeException(path, "unknown kid kind '$kn'")
+        }
+        dev.loong.engine.rules.StructuralInvariants.problemOf(kind, kidKinds, litKind)
+            ?.let { throw TreeShapeException(path, it) }
+        kidObjs.forEachIndexed { i, kid ->
+            validateTree(t, kid as Json.Obj, "$path.kids[$i]")
+        }
+    }
+
+    /** 树节点 fields → FieldValue（值形态与 ref 存在性校验）。 */
+    private fun treeFieldsOf(t: NodeTable, node: Json.Obj, path: String): Map<String, FieldValue> {
+        val out = HashMap<String, FieldValue>()
+        (node.map["fields"] as? Json.Obj)?.map?.forEach { (k, v) ->
+            out[k] = when (v) {
+                is Json.Str -> FieldValue.Str(v.v)
+                is Json.Bool -> FieldValue.Bool(v.v)
+                is Json.Num -> FieldValue.Int(v.v)
+                is Json.Obj -> {
+                    val r = (v.map["r"] as? Json.Num)?.let { NodeId(it.v) }
+                        ?: (v.map["r"] as? Json.Str)?.let { NodeId(it.v.toLong()) }
+                        ?: throw TreeShapeException("$path.fields.$k", "field object must be {\"r\": <id>}")
+                    if (t.getOrNull(r) == null) {
+                        throw TreeShapeException("$path.fields.$k", "ref ${r.value} does not exist in this module")
+                    }
+                    FieldValue.Ref(r)
+                }
+                else -> throw TreeShapeException(
+                    "$path.fields.$k",
+                    "unsupported field value; use string / number / boolean / {\"r\": id}",
+                )
+            }
+        }
+        return out
+    }
+
+    /** 校验后构建：自底向上 create 游离子树（create 收养游离 kids 的契约逐层成立）。 */
+    private fun buildTree(t: NodeTable, node: Json.Obj): NodeId {
+        val kids = ((node.map["kids"] as? Json.Arr)?.items ?: emptyList())
+            .map { buildTree(t, it as Json.Obj) }
+        return t.create(kindOf(node), treeFieldsOf(t, node, ""), kids)
+    }
+
+    private fun kindOf(node: Json.Obj): Kind =
+        Kind.entries.first { it.name == (node.map["kind"] as Json.Str).v }
+
+    /** 树（或树数组）统一取为列表。 */
+    private fun treeListOf(body: Json.Obj): List<Json.Obj> {
+        val single = body.map["tree"] as? Json.Obj
+        val many = (body.map["trees"] as? Json.Arr)?.items?.map { it as Json.Obj }
+        val list = many ?: single?.let { listOf(it) } ?: error("missing 'tree' or 'trees'")
+        if (list.isEmpty()) error("tree list is empty")
+        return list
+    }
+
+    /** 结构化建模块：新表 + Module 根 + 声明树（先全部校验，后构建挂接）。 */
+    private fun loadStructured(moduleName: String, trees: List<Json.Obj>): dev.loong.engine.workspace.ModuleState {
+        val table = NodeTable()
+        val root = table.create(Kind.Module, mapOf("name" to FieldValue.Str(moduleName)))
+        trees.forEachIndexed { i, tr -> validateTree(table, tr, "trees[$i]") }
+        trees.forEach { tr ->
+            val built = buildTree(table, tr)
+            table.attach(built, root, table[root].kids.size)
+        }
+        return workspace.loadTable(table, root)
+    }
+
+    /** 模块名校验与规范化（dotted 反向域名 + 可选 /vN；省略版本补 /v1）。 */
+    private fun normalizeModuleName(raw: String): String {
+        val seg = "[A-Za-z_][A-Za-z0-9_]*"
+        require(Regex("^$seg(\\.$seg)*(\\/v[0-9]+)?$").matches(raw)) {
+            "bad module name '$raw' (dotted reverse-domain, optional /vN)"
+        }
+        return if (raw.contains('/')) raw else "$raw/v1"
+    }
+
+    /**
+     * 树/节点批量操作分发（/batch 的单项执行；/tree 的整批执行）。
+     * insert_tree / replace_tree 为树操作（先整棵校验后构建）；move / delete /
+     * replace 复用 [applyEdit]。
+     */
+    private fun applyTreeOp(t: NodeTable, op: Json.Obj): Any? {
+        val kind = (op.map["op"] as? Json.Str)?.v ?: error("op requires 'op'")
+        return when (kind) {
+            "insert_tree" -> {
+                val trees = treeListOf(op)
+                trees.forEachIndexed { i, tr -> validateTree(t, tr, "trees[$i]") }
+                val parent = op.map["parent"]?.let { NodeId(long(op, "parent")) }
+                    ?: t.find(Kind.Module).first()
+                val index = op.map["index"]?.let { (it as Json.Num).v.toInt() }
+                    ?: t[parent].kids.size
+                // index + i：多棵树保持给出顺序（attach 的 coerceIn 兜底越界）
+                trees.mapIndexed { i, tr ->
+                    val root = buildTree(t, tr)
+                    t.attach(root, parent, index + i)
+                    root.value
+                }
+            }
+            "replace_tree" -> {
+                val target = NodeId(long(op, "id"))
+                val tree = op.map["tree"] as? Json.Obj ?: error("replace_tree requires 'tree'")
+                validateTree(t, tree, "tree")
+                t.getOrNull(target) ?: error("node $target does not exist in this module")
+                val kids = ((tree.map["kids"] as? Json.Arr)?.items ?: emptyList())
+                    .map { buildTree(t, it as Json.Obj) }
+                t.replace(target, treeFieldsOf(t, tree, "tree").ifEmpty { null }, kids)
+                target.value
+            }
+            else -> applyEdit(t, op)
         }
     }
 
@@ -614,9 +874,6 @@ class LoongdServer(
                 if (lookup(module) != null) workspaceSource.fetch(module, version) else registry.fetch(module, version)
         }
     }
-
-    /** 链接脏标记：需要重链的模块集合（变更路径单写者线程访问；启动为单线程）。 */
-    private val linkDirty = LinkedHashSet<String>()
 
     /** 变更后重链全部模块（模块集合变化时用：load/delete/checkout）。 */
     private fun relinkAll() {

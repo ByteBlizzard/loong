@@ -60,7 +60,7 @@ class McpModuleToolsTest {
             return sb.toString()
         }
 
-        // 工具面宣告：四个新工具在列，create_module 带 source schema
+        // 工具面宣告：四个新工具在列，create_module 双形态（module/trees 结构化 + source 兼容）
         request("initialize")
         writer.println("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
         val tools = request("tools/list").map["result"].let { it as Json.Obj }.map["tools"] as Json.Arr
@@ -70,9 +70,8 @@ class McpModuleToolsTest {
             names.toString(),
         )
         val create = tools.items.map { it as Json.Obj }.first { (it.map["name"] as Json.Str).v == "create_module" }
-        val required = ((create.map["inputSchema"] as Json.Obj).map["required"] as Json.Arr).items
-            .map { (it as Json.Str).v }
-        assertEquals(listOf("source"), required)
+        val createProps = ((create.map["inputSchema"] as Json.Obj).map["properties"] as Json.Obj).map.keys
+        assertTrue(createProps.containsAll(setOf("module", "trees", "source")), createProps.toString())
 
         // list_modules：预置的 main/example 可见
         val listed = callText("list_modules")
