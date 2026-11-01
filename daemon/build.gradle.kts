@@ -27,3 +27,11 @@ kotlin {
 tasks.test {
     useJUnitPlatform()
 }
+
+// 标准库源随 daemon 打包（SystemModules 启动装载为系统模块）
+tasks.processResources {
+    from(layout.projectDirectory.dir("../stdlib/loong")) {
+        include("*.loong")
+        into("stdlib")
+    }
+}

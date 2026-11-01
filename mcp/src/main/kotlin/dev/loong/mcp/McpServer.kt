@@ -372,6 +372,56 @@ class McpSession(
         ) { _ ->
             post("/build", "{}")
         },
+        // ---------- JVM 生态：三方依赖管理 + 类查询（写 external 声明前先查） ----------
+        Tool(
+            "list_jvm_deps",
+            "查看 JVM 三方依赖：jvm-deps.json 坐标清单 + 当前生效 jar（libs/ 手放 + 解析产物）+ 最近解析错误。",
+        ) { _ ->
+            get("/jvmdeps")
+        },
+        Tool(
+            "add_jvm_dep",
+            "添加 JVM 三方依赖（Maven 坐标 group:artifact:version）。daemon 委托本机 gradle/mvn " +
+                "解析 classpath；成功后 java_class_info、external 声明校验、测试与构建即可使用该库。" +
+                "解析失败不阻塞——结果里带错误与兜底建议（手动放 jar 到项目 libs/ 目录）。",
+            schema(
+                prop("coordinate", "string", "Maven 坐标，如 com.google.code.gson:gson:2.11.0"),
+                required = listOf("coordinate"),
+            ),
+        ) { a ->
+            post(
+                "/jvmdeps",
+                Json.write(
+                    mapOf("coordinate" to (argString(a, "coordinate") ?: error("coordinate required"))),
+                ),
+            )
+        },
+        Tool(
+            "remove_jvm_dep",
+            "移除一条 JVM 三方依赖并重解析 classpath。",
+            schema(prop("coordinate", "string", "Maven 坐标"), required = listOf("coordinate")),
+        ) { a ->
+            delete("/jvmdeps/${enc(argString(a, "coordinate") ?: error("coordinate required"))}")
+        },
+        Tool(
+            "resolve_jvm_deps",
+            "手动重解析 JVM 三方依赖（直接改了 jvm-deps.json 或 libs/ 之后，或上次解析失败重试）。",
+        ) { _ ->
+            post("/jvmdeps/resolve", "{}")
+        },
+        Tool(
+            "java_class_info",
+            "反射查询 JVM 类的 public API：构造器 / 静态方法 / 实例方法（参数与返回的 JVM 类型）" +
+                "+ loong 类型映射提示（int→Int32、long→Int、double→Float…）。" +
+                "写 external java 声明前先查真实签名，不要凭记忆猜——JDK 类开箱即查，" +
+                "三方类需先 add_jvm_dep 或放入 libs/。写法手册见 resource loong://guide/interop。",
+            schema(
+                prop("fqn", "string", "类全限定名，如 java.nio.file.Files"),
+                required = listOf("fqn"),
+            ),
+        ) { a ->
+            get("/jvm/class?fqn=${enc(argString(a, "fqn") ?: error("fqn required"))}")
+        },
         Tool(
             "add_dependency",
             "添加 depends 声明（registry 源）。跨模块引用前先加依赖，否则 E_UNKNOWN_NAME。",

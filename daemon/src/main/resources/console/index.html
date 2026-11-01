@@ -24,6 +24,24 @@
   .pill.err { color:var(--err); border-color:var(--err); }
   .ev { padding:3px 6px; border-bottom:1px solid var(--line); font-family:Consolas,monospace; font-size:12px; }
   pre.usage { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; margin:6px 0; }
+  /* 原始 AST 树 */
+  #code { max-height:640px; }
+  #ast-tree { max-height:640px; overflow:auto; font:13px/1.7 Consolas,monospace; }
+  .trow { display:flex; gap:6px; align-items:baseline; white-space:nowrap; padding:1px 6px; border-radius:4px; cursor:pointer; }
+  .trow:hover { background:#262a31; }
+  .trow.sel { background:#20344a; box-shadow:inset 0 0 0 1px var(--acc); }
+  .tg { width:14px; flex:none; color:var(--dim); text-align:center; }
+  .tkind { color:var(--acc); flex:none; }
+  .tsum { overflow:hidden; text-overflow:ellipsis; }
+  .tid { color:var(--dim); font-size:11px; flex:none; }
+  .fdrow { display:flex; gap:8px; align-items:baseline; padding:2px 0; border-bottom:1px solid var(--line); font-family:Consolas,monospace; font-size:12px; }
+  .fdkey { color:var(--dim); min-width:120px; flex:none; }
+  .fdtag { font-size:11px; color:var(--bg); background:var(--dim); border-radius:8px; padding:0 7px; flex:none; }
+  .fdval { word-break:break-all; }
+  .aref { color:var(--acc); cursor:pointer; text-decoration:underline dotted; }
+  .kchip { display:inline-block; margin:2px 4px 2px 0; padding:0 8px; border:1px solid var(--line); border-radius:10px; cursor:pointer; font-size:12px; font-family:Consolas,monospace; }
+  .kchip:hover { border-color:var(--acc); color:var(--acc); }
+  pre.nodecode { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; margin:8px 0 0; font:12.5px/1.55 Consolas,monospace; white-space:pre; overflow:auto; max-height:280px; }
   button.act { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:4px 12px; cursor:pointer; }
   button.gray { background:none; color:var(--dim); border:1px solid var(--line); border-radius:6px; padding:4px 12px; cursor:pointer; }
   #modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; }
@@ -38,6 +56,7 @@
     <button data-t="mcp">MCP</button>
     <button data-t="code">代码</button>
     <button data-t="build">构建</button>
+    <button data-t="jvm">JVM 依赖</button>
     <button data-t="diag">诊断池</button>
     <button data-t="tests">测试</button>
     <button data-t="deps">依赖</button>
@@ -80,7 +99,7 @@ build/（构建 jar 与 class 中间产物，见「构建」页）。
 每个项目一个常驻 daemon，端口随机分配互不冲突；Web UI 地址以启动输出为准（即本页）。</pre>
 
       <b style="display:block;margin-top:16px">本页各页签</b>
-      <div class="ev">代码 — AST 渲染文本 / 原始 AST（.loongast JSON）切换 + 实时诊断　|　构建 — 打包项目为可运行 JAR</div>
+      <div class="ev">代码 — AST 渲染文本 / 原始 AST（可折叠节点树，点击节点看属性、导出成代码）+ 实时诊断　|　构建 — 打包项目为可运行 JAR</div>
       <div class="ev">诊断池 — 全量诊断列表</div>
       <div class="ev">测试 — 运行与结果（按 Test 节点 ID 索引）　|　依赖 — depends 声明</div>
       <div class="ev">AI 活动流 — SSE 实时事件（变更/审批请求）　|　MCP — agent 接入指南与连接状态</div>
@@ -130,7 +149,12 @@ build/（构建 jar 与 class 中间产物，见「构建」页）。
         <button id="v-ast" class="gray" style="padding:2px 10px" onclick="setView('ast')">原始 AST</button>
         <button id="ast-copy" class="gray" style="padding:2px 10px;display:none" onclick="copyAst()">复制 AST</button>
       </span>
-      <pre id="code" style="margin-top:8px">—</pre></div>
+      <pre id="code" style="margin-top:8px">—</pre>
+      <div id="ast-tree" style="display:none"></div>
+      <p class="muted" id="ast-hint" style="display:none;margin:8px 0 0">节点树与持久化字节一致（.loongast）。
+        ▸/▾ 折叠展开；点击节点查看属性；属性面板可「导出成代码」查看该节点子树的源代码表示。</p></div>
+    <div class="col" id="node-col" style="display:none;min-width:320px;max-width:420px"><b>节点属性</b>
+      <div id="node-detail" style="margin-top:8px">—</div></div>
     <div class="col"><b>诊断</b><div id="code-diag" style="margin-top:8px">—</div></div>
   </section>
 
@@ -146,6 +170,22 @@ build/（构建 jar 与 class 中间产物，见「构建」页）。
 
   <section id="p-diag" class="row" style="display:none;margin-top:12px">
     <div class="col"><b>诊断池（全模块）</b><div id="all-diag" style="margin-top:8px">—</div></div>
+  </section>
+
+  <section id="p-jvm" class="row" style="display:none;margin-top:12px">
+    <div class="col" style="flex:2"><b>JVM 三方依赖</b>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <input id="jvm-coord" placeholder="group:artifact:version，如 com.google.code.gson:gson:2.11.0"
+               style="flex:1;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px">
+        <button class="act" onclick="addJvmDep()">添加</button>
+        <button class="gray" onclick="resolveJvmDeps()">重解析</button>
+      </div>
+      <div id="jvm-deps" style="margin-top:8px">—</div>
+      <p class="muted" style="margin-top:12px">坐标写入项目 <code>jvm-deps.json</code>，由 daemon 委托本机
+      gradle/mvn 解析 classpath；没有构建工具时，把 jar 手动放进项目 <code>libs/</code> 目录效果等价。
+      解析结果供 external 声明校验（E_EXTERNAL_*）、测试运行与构建（自动复制进 build/libs/）使用；
+      agent 侧等价工具：add_jvm_dep / list_jvm_deps / java_class_info。</p></div>
+    <div class="col"><b>当前生效 classpath</b><div id="jvm-jars" style="margin-top:8px">—</div></div>
   </section>
 
   <section id="p-tests" class="row" style="display:none;margin-top:12px">
@@ -177,7 +217,9 @@ build/（构建 jar 与 class 中间产物，见「构建」页）。
 const $ = s => document.querySelector(s);
 const enc = m => encodeURIComponent(m);
 let current = null, pendingReview = null;
-let view = 'render', renderText = '', astText = '';
+let view = 'render', renderText = '', astData = null, astText = '';
+// 原始 AST 树状态：id→节点 索引、根、展开集合、选中节点（SSE 变更刷新时保留）
+let astMap = new Map(), astRoot = null, astExpanded = new Set(), astSelected = null, astStateModule = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -205,7 +247,10 @@ async function refreshAll() {
     api('/modules/' + enc(current) + '/diagnostics'),
   ]);
   renderText = code;
-  try { astText = JSON.stringify(JSON.parse(ast), null, 2); } catch { astText = ast; }
+  // api() 对可解析响应已返回对象；不可解析（出错页等）保持原文本
+  astData = typeof ast === 'object' && ast !== null ? ast : null;
+  astText = astData ? JSON.stringify(astData, null, 2) : String(ast);
+  buildAstIndex();
   renderView();
   $('#rev').textContent = 'rev ' + diag.revision;
   renderDiag($('#code-diag'), diag.diagnostics || []);
@@ -218,7 +263,20 @@ async function refreshAll() {
 
 // 代码页视图切换：渲染文本 ↔ 原始 AST（.loongast 规范 JSON，与持久化字节一致）
 function renderView() {
-  $('#code').textContent = view === 'ast' ? (astText || '—') : (renderText || '—');
+  const isAst = view === 'ast';
+  $('#code').style.display = isAst ? 'none' : '';
+  $('#ast-tree').style.display = isAst ? '' : 'none';
+  $('#ast-hint').style.display = isAst ? '' : 'none';
+  if (!isAst) { $('#code').textContent = renderText || '—'; return; }
+  if (!astData) {
+    $('#ast-tree').innerHTML = '<span class="muted">AST 不可用：' + escapeHtml(astText || '未知错误') + '</span>';
+    $('#node-col').style.display = 'none';
+    return;
+  }
+  renderAstTree();
+  // 刷新后选中节点若仍在，同步属性面板
+  if (astSelected != null && astMap.has(astSelected)) renderNodeDetail(astSelected);
+  else { astSelected = null; $('#node-col').style.display = 'none'; }
 }
 
 function setView(v) {
@@ -234,6 +292,184 @@ function copyAst() {
     $('#ast-copy').textContent = '已复制';
     setTimeout(() => { $('#ast-copy').textContent = '复制 AST'; }, 2000);
   });
+}
+
+// ---------- 原始 AST 树 ----------
+
+/** 由扁平节点表建索引；根 = parent=="0"。切换模块时重置展开/选中，SSE 变更则保留并清理已消失节点。 */
+function buildAstIndex() {
+  astMap = new Map();
+  astRoot = null;
+  if (!astData || !Array.isArray(astData.nodes)) return;
+  for (const n of astData.nodes) astMap.set(String(n.id), n);
+  for (const n of astData.nodes) if (String(n.parent) === '0') { astRoot = String(n.id); break; }
+  if (astStateModule !== current) {
+    astStateModule = current;
+    astExpanded = new Set();
+    astSelected = null;
+  }
+  // 首次进入默认展开两层（模块 + 顶层声明）
+  if (astRoot != null && astExpanded.size === 0) {
+    astExpanded.add(astRoot);
+    (astMap.get(astRoot).kids || []).forEach(k => astExpanded.add(String(k)));
+  }
+  astExpanded = new Set([...astExpanded].filter(id => astMap.has(id)));
+  if (astSelected != null && !astMap.has(astSelected)) astSelected = null;
+}
+
+function renderAstTree() {
+  const box = $('#ast-tree');
+  box.innerHTML = '';
+  if (astRoot == null) { box.innerHTML = '<span class="muted">未找到根节点（parent=0）</span>'; return; }
+  box.appendChild(treeRow(astRoot, 0));
+}
+
+/** 单行节点 + （展开时）子树。只渲染展开部分，折叠的大子树不进 DOM。 */
+function treeRow(id, depth) {
+  const n = astMap.get(id);
+  const wrap = document.createElement('div');
+  if (!n) return wrap;
+  const kids = (n.kids || []).map(String);
+  const row = document.createElement('div');
+  row.className = 'trow' + (astSelected === id ? ' sel' : '');
+  row.style.paddingLeft = (depth * 18 + 2) + 'px';
+  row.title = n.kind + ' #' + id + '（点击查看属性）';
+  const tg = document.createElement('span');
+  tg.className = 'tg';
+  tg.textContent = kids.length ? (astExpanded.has(id) ? '▾' : '▸') : '·';
+  if (kids.length) tg.onclick = e => { e.stopPropagation(); toggleAst(id); };
+  row.appendChild(tg);
+  const kind = document.createElement('span');
+  kind.className = 'tkind';
+  kind.textContent = n.kind;
+  row.appendChild(kind);
+  const sum = nodeSummary(n);
+  if (sum) {
+    const s = document.createElement('span');
+    s.className = 'tsum';
+    s.textContent = sum.length > 48 ? sum.slice(0, 48) + '…' : sum;
+    row.appendChild(s);
+  }
+  const nid = document.createElement('span');
+  nid.className = 'tid';
+  nid.textContent = '#' + id;
+  row.appendChild(nid);
+  row.onclick = () => selectAst(id);
+  wrap.appendChild(row);
+  if (astExpanded.has(id)) for (const k of kids) wrap.appendChild(treeRow(k, depth + 1));
+  return wrap;
+}
+
+function toggleAst(id) {
+  if (astExpanded.has(id)) astExpanded.delete(id); else astExpanded.add(id);
+  renderAstTree();
+}
+
+function selectAst(id) {
+  astSelected = id;
+  // 选中深层节点时展开其祖先链，保证可见
+  let p = astMap.get(id) && String(astMap.get(id).parent);
+  while (p && p !== '0' && astMap.has(p)) { astExpanded.add(p); p = String(astMap.get(p).parent); }
+  renderAstTree();
+  renderNodeDetail(id);
+}
+
+/** 各 kind 的摘要字段（树行上人能认出的那句）。 */
+const SUMMARY_FIELDS = {
+  Module: ['name'], Depends: ['module_name'], Function: ['name'], Param: ['name', 'type'],
+  TypeParam: ['name'], Struct: ['name'], Field: ['name', 'type'], Interface: ['name'],
+  Enum: ['name'], Variant: ['name'], Const: ['name'], Test: ['name'], ExternalClass: ['class_fqn'],
+  ExternalMethod: ['name'], Let: ['name', 'type'], For: ['var_name'], IfLet: ['path'],
+  Path: ['written'], Binary: ['op'], Unary: ['op'], FieldAccess: ['field'],
+  MatchArm: ['path', 'literal'],
+};
+
+function nodeSummary(n) {
+  const f = n.fields || {};
+  const s = k => { const v = f[k]; return (v && typeof v === 'object' && 's' in v && v.s !== '') ? v.s : null; };
+  if (n.kind === 'Impl') return [s('struct'), s('interface')].filter(Boolean).join(' for ');
+  if (n.kind === 'Literal') return s('value') != null ? JSON.stringify(s('value')) : s('lit_kind');
+  if (n.kind === 'DocComment') { const t = s('text'); return t ? '/// ' + t.split('\n')[0] : null; }
+  const parts = [];
+  for (const k of (SUMMARY_FIELDS[n.kind] || [])) {
+    const v = s(k);
+    if (v != null) parts.push(v);
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ') || null;
+}
+
+/** .loongast 字段类型标签解码：{"s":..} 字符串 / {"i":..} 整数 / {"b":..} 布尔 / {"r":..} 节点引用。 */
+function decodeField(v) {
+  if (v == null || typeof v !== 'object') return { type: '?', text: JSON.stringify(v) };
+  if ('s' in v) return { type: '字符串', text: JSON.stringify(v.s) };
+  if ('i' in v) return { type: '整数', text: String(v.i) };
+  if ('b' in v) return { type: '布尔', text: String(v.b) };
+  if ('r' in v) return { type: '引用', text: '节点 ' + v.r, ref: String(v.r) };
+  return { type: '?', text: JSON.stringify(v) };
+}
+
+function renderNodeDetail(id) {
+  const n = astMap.get(id);
+  if (!n) { $('#node-col').style.display = 'none'; return; }
+  $('#node-col').style.display = '';
+  const kids = (n.kids || []).map(String);
+  let h = '<div class="fdrow"><span class="fdkey">kind</span>' +
+    '<span class="fdval"><span class="tkind">' + n.kind + '</span> <span class="tid">#' + id + '</span>' +
+    ' <span class="tid">' + kids.length + ' 个子节点</span></span></div>';
+  if (String(n.parent) !== '0' && astMap.has(String(n.parent))) {
+    const p = astMap.get(String(n.parent));
+    h += '<div class="fdrow"><span class="fdkey">parent</span>' +
+      '<span class="fdval"><span class="aref" onclick="selectAst(\'' + n.parent + '\')">' +
+      p.kind + ' #' + n.parent + '</span></span></div>';
+  } else {
+    h += '<div class="fdrow"><span class="fdkey">parent</span><span class="fdval muted">（模块根）</span></div>';
+  }
+  const keys = Object.keys(n.fields || {}).sort();
+  h += keys.map(k => {
+    const d = decodeField(n.fields[k]);
+    const val = d.ref != null
+      ? '<span class="aref" onclick="selectAst(\'' + d.ref + '\')">#' + d.ref +
+        (astMap.get(d.ref) ? ' ' + astMap.get(d.ref).kind : '') + '</span>'
+      : escapeHtml(d.text);
+    return '<div class="fdrow"><span class="fdkey">' + escapeHtml(k) + '</span>' +
+      '<span class="fdtag">' + d.type + '</span><span class="fdval">' + val + '</span></div>';
+  }).join('') || '<div class="fdrow"><span class="fdkey">fields</span><span class="fdval muted">（无）</span></div>';
+  h += '<div style="margin-top:8px"><span class="muted">子节点</span><br>' +
+    (kids.map(k => {
+      const kn = astMap.get(k);
+      return '<span class="kchip" onclick="selectAst(\'' + k + '\')">' + (kn ? kn.kind : '?') + ' #' + k + '</span>';
+    }).join('') || '<span class="muted">（无）</span>') + '</div>';
+  h += '<div style="margin-top:10px">' +
+    '<button class="act" style="padding:2px 10px" onclick="exportNodeCode(\'' + id + '\')">导出成代码</button>' +
+    '<button class="gray" style="padding:2px 10px;margin-left:6px" onclick="copyNodeJson(\'' + id + '\')">复制节点 JSON</button></div>' +
+    '<pre id="node-code" class="nodecode" style="display:none"></pre>';
+  $('#node-detail').innerHTML = h;
+}
+
+/** 节点子树 → 源代码（服务端 Renderer.renderNode 渲染）。 */
+async function exportNodeCode(id) {
+  const pre = $('#node-code');
+  pre.style.display = '';
+  pre.textContent = '加载中…';
+  try {
+    const r = await fetch('/modules/' + enc(current) + '/node/' + id + '/render');
+    const t = await r.text();
+    pre.textContent = r.ok ? t : '渲染失败：' + t;
+  } catch (e) {
+    pre.textContent = '渲染失败：' + e;
+  }
+}
+
+function copyNodeJson(id) {
+  const n = astMap.get(id);
+  if (!n) return;
+  navigator.clipboard.writeText(JSON.stringify(n, null, 2));
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function buildProject() {
@@ -260,6 +496,43 @@ function renderDiag(el, list) {
   el.innerHTML = list.length ? list.map(d =>
     `<div class="diag" title="节点 ${d.node}"><span class="code">${d.code}</span><span>${d.message}</span></div>`).join('')
     : '<span class="pill ok">无诊断</span>';
+}
+
+// ---------- JVM 三方依赖 ----------
+
+async function refreshJvmDeps() {
+  const d = await api('/jvmdeps');
+  const deps = d.dependencies || [];
+  $('#jvm-deps').innerHTML = deps.map(c =>
+    `<div class="ev"><code>${escapeHtml(c)}</code>
+       <button class="gray" onclick="removeJvmDep('${escapeHtml(c)}')">移除</button></div>`).join('')
+    || '<span class="muted">无坐标（jvm-deps.json 为空）</span>';
+  const jars = d.jars || [];
+  $('#jvm-jars').innerHTML =
+    (d.resolved ? '<span class="pill ok">已解析</span>' : '<span class="pill">未解析/解析失败</span>') +
+    (d.tool && d.tool !== 'none' ? ` <span class="muted">经 ${d.tool}</span>` : '') +
+    jars.map(j => `<div class="ev">${escapeHtml(j)}</div>`).join('') +
+    (d.error ? `<pre class="usage" style="margin-top:8px">${escapeHtml(d.error)}</pre>` : '');
+}
+
+async function addJvmDep() {
+  const coord = $('#jvm-coord').value.trim();
+  if (!coord) return;
+  $('#jvm-deps').innerHTML = '<span class="muted">解析中…（委托 gradle/mvn，可能数十秒）</span>';
+  await api('/jvmdeps', { method: 'POST', body: JSON.stringify({ coordinate: coord }) });
+  $('#jvm-coord').value = '';
+  refreshJvmDeps();
+}
+
+async function removeJvmDep(coord) {
+  await api('/jvmdeps/' + enc(coord), { method: 'DELETE' });
+  refreshJvmDeps();
+}
+
+async function resolveJvmDeps() {
+  $('#jvm-jars').innerHTML = '<span class="muted">解析中…</span>';
+  await api('/jvmdeps/resolve', { method: 'POST', body: '{}' });
+  refreshJvmDeps();
 }
 
 async function runTests() {
@@ -324,10 +597,11 @@ async function quick(id, approved) {
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
-  ['home','mcp','code','build','diag','tests','deps','stream'].forEach(t =>
+  ['home','mcp','code','build','jvm','diag','tests','deps','stream'].forEach(t =>
     $('#p-' + t).style.display = t === b.dataset.t ? 'flex' : 'none');
   if (b.dataset.t === 'stream') refreshReviews();
   if (b.dataset.t === 'mcp') refreshMcpStatus();
+  if (b.dataset.t === 'jvm') refreshJvmDeps();
 });
 
 // 首页状态

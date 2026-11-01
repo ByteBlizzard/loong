@@ -57,6 +57,9 @@ object Packages {
                 }
                 Kind.Struct, Kind.Interface, Kind.Enum, Kind.Const ->
                     fs(t, kid, "visibility") == "public"
+                // 外部声明是模块编译契约的一部分：消费方的 externalTypes 映射与
+                // 跨模块类型（如 loong.net.TcpConn）都依赖它，必须随接口 AST 分发
+                Kind.ExternalClass -> true
                 else -> false
             }
             if (!keep) t.delete(kid)

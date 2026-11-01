@@ -36,7 +36,8 @@ class Resolver(
 
     fun resolve(root: NodeId): List<Diagnostic> {
         val moduleDotted = fs(root, "name").substringBefore('/')
-        symbols = linked ?: SymbolTable()
+        // link 表只读共享：解析期注册（内建符号 + 本模块声明）落在副本上
+        symbols = linked?.copyForResolve() ?: SymbolTable()
         CoreSymbols.registerInto(symbols)
         registerModuleSymbols(root, moduleDotted)
         resolveTestTargets(root)

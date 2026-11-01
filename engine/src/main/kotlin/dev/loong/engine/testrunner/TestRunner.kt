@@ -4,6 +4,7 @@ import dev.loong.engine.ast.FieldValue
 import dev.loong.engine.ast.Kind
 import dev.loong.engine.ast.NodeId
 import dev.loong.engine.ast.NodeTable
+import java.nio.file.Path
 
 /** 单个 test 块的运行结果，按 Test 节点 ID 索引（design §8.2 测试运行器）。 */
 class TestResult(
@@ -16,14 +17,41 @@ class TestResult(
 /**
  * 进程内测试运行器：加载模块字节码，反射调用 `$test$<节点ID>` 方法。
  * 测试失败 = 抛出的任何 Throwable（Loong 无异常，运行时错误如除零即失败）。
+ * 跨模块支持：[deps] 为依赖闭包模块（含系统模块）的字节码，与被测模块同一
+ * 加载器；[extraClasspath] 为额外 classpath 入口（注册表 classes 目录、三方 jar），
+ * 以 URLClassLoader 挂在父链上（不能解析被测模块自身的类）。
  * 增量测试：[subtreeHash] 供调用方缓存被测函数内容指纹，未变则跳过。
  */
 class TestRunner(private val table: NodeTable, private val hostClassName: String) {
 
-    fun runTests(classes: Map<String, ByteArray>): List<TestResult> {
+    fun runTests(
+        classes: Map<String, ByteArray>,
+        deps: Map<String, ByteArray> = emptyMap(),
+        extraClasspath: List<Path> = emptyList(),
+    ): List<TestResult> {
         if (classes.isEmpty()) return emptyList()
-        val loader = ByteClassLoader(TestRunner::class.java.classLoader)
+        // extraClasspath 的 URLClassLoader 由本次调用私有：结束后关闭释放 jar 句柄
+        //（Windows 上不关会锁住 libs/ 与缓存里的 jar 文件）
+        val jarsLoader = if (extraClasspath.isEmpty()) null else java.net.URLClassLoader(
+            extraClasspath.map { it.toUri().toURL() }.toTypedArray(),
+            TestRunner::class.java.classLoader,
+        )
+        val parent = jarsLoader ?: TestRunner::class.java.classLoader
+        try {
+            return runLoaded(classes, deps, parent)
+        } finally {
+            jarsLoader?.let { runCatching { it.close() } }
+        }
+    }
+
+    private fun runLoaded(
+        classes: Map<String, ByteArray>,
+        deps: Map<String, ByteArray>,
+        parent: ClassLoader,
+    ): List<TestResult> {
+        val loader = ByteClassLoader(parent)
         classes.forEach { (internal, bytes) -> loader.define(internal, bytes) }
+        deps.forEach { (internal, bytes) -> if (internal !in classes) loader.define(internal, bytes) }
         val host = try {
             loader.loadClass(hostClassName)
         } catch (e: Throwable) {

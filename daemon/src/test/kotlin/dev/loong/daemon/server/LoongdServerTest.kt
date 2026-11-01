@@ -120,6 +120,19 @@ class LoongdServerTest {
         assertEquals(200, s6)
         assertTrue("\"kind\":\"Module\"" in b6, b6)
 
+        // 节点级渲染（Web UI 原始 AST 树「导出成代码」）：函数节点子树 → 源代码
+        val (_, nodes) = get(c, port, "/modules/demo.daemon%2Fv1/nodes?kind=Function")
+        val fnId = Regex("\"id\":(\\d+)").find(nodes)?.groupValues?.get(1)
+            ?: error("no Function node found: $nodes")
+        val (s7, b7) = get(c, port, "/modules/demo.daemon%2Fv1/node/$fnId/render")
+        assertEquals(200, s7, b7)
+        assertTrue("function add" in b7, b7)
+        assertTrue("/// Adds." in b7, b7)
+        // 不存在的节点：400 + 错误信息
+        val (s8, b8) = get(c, port, "/modules/demo.daemon%2Fv1/node/99999/render")
+        assertEquals(400, s8, b8)
+        assertTrue("does not exist" in b8, b8)
+
         server.close()
 
         // 崩溃恢复：新进程同一数据库

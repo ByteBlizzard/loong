@@ -14,6 +14,58 @@ import dev.loong.engine.ast.NodeTable
  */
 class Renderer(private val table: NodeTable) {
 
+    /**
+     * 渲染任意节点的子树为代码（Web UI 原始 AST 树的「导出成代码」）：
+     * 按 kind 分发到模块/声明/语句/表达式各自的渲染路径，深度归零。
+     */
+    fun renderNode(id: NodeId): String = when (n(id).kind) {
+        Kind.Module -> render(id)
+        Kind.Depends -> renderDepends(id).trimEnd('\n')
+        Kind.DocComment -> renderDoc(id, 0)
+        Kind.Block -> renderBlock(id, 0)
+        Kind.Function, Kind.Struct, Kind.Interface, Kind.Impl, Kind.Enum,
+        Kind.Const, Kind.Test, Kind.ExternalClass,
+        -> renderDecl(id, 0)
+
+        Kind.Let, Kind.Assign, Kind.If, Kind.IfLet, Kind.While, Kind.For,
+        Kind.Match, Kind.Return, Kind.Break, Kind.Continue, Kind.ExprStmt,
+        -> renderStmt(id, 0)
+
+        Kind.Call, Kind.Arg, Kind.Binary, Kind.Unary, Kind.Literal, Kind.MapEntry,
+        Kind.Path, Kind.FieldAccess, Kind.Index, Kind.Spawn, Kind.Join,
+        -> renderExpr(id, 0)
+
+        Kind.MatchArm -> renderPattern(id) + " => " + renderArmBody(id, 0)
+        Kind.Param -> renderParam(id)
+        Kind.TypeParam -> fs(id, "name")
+        Kind.Field -> fs(id, "name") + ": " + fs(id, "type")
+        Kind.Variant -> {
+            var s = fs(id, "name")
+            n(id).fields["payload_type"]?.let { s += "(" + (it as FieldValue.Str).value + ")" }
+            s
+        }
+
+        Kind.MethodSig -> renderMethodSig(id)
+        Kind.ExternalMethod -> renderExternalMethod(id)
+    }
+
+    private fun renderArmBody(arm: NodeId, depth: Int): String {
+        val body = n(arm).kids.first()
+        return if (n(body).kind == Kind.Block) renderBlock(body, depth) else renderExpr(body, depth)
+    }
+
+    private fun renderMethodSig(id: NodeId): String {
+        val tps = kids(id, Kind.TypeParam)
+        return ("function " + fs(id, "name") + renderTypeParams(tps) +
+            "(" + kids(id, Kind.Param).joinToString(", ") { renderParam(it) } + ")" +
+            " -> " + fs(id, "return_type") + renderWhere(tps) + ";")
+    }
+
+    private fun renderExternalMethod(id: NodeId): String =
+        fs(id, "call_kind") + " function " + fs(id, "name") +
+            "(" + kids(id, Kind.Param).joinToString(", ") { renderParam(it) } + ")" +
+            " -> " + fs(id, "return_type")
+
     fun render(root: NodeId): String {
         val sb = StringBuilder()
         sb.append("module ").append(fs(root, "name"))

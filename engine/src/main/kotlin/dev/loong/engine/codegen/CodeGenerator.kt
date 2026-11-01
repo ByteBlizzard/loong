@@ -1567,7 +1567,9 @@ class CodeGenerator(
             }
             "Ljava/lang/String;" -> mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String")
             "L$VARIANT;" -> mv.visitTypeInsn(Opcodes.CHECKCAST, VARIANT)
-            else -> if (d.startsWith("L")) mv.visitTypeInsn(Opcodes.CHECKCAST, d.substring(1, d.length - 1))
+            // 数组载荷直接 checkcast（如外部方法 Ok(Array<String>)，运行时是协变的 String[]）
+            else -> if (d.startsWith("[")) mv.visitTypeInsn(Opcodes.CHECKCAST, d)
+                else if (d.startsWith("L")) mv.visitTypeInsn(Opcodes.CHECKCAST, d.substring(1, d.length - 1))
         }
     }
 

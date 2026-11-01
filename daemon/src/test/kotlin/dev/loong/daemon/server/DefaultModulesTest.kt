@@ -73,12 +73,17 @@ class DefaultModulesTest {
             assertEquals(200, s)
         }
 
-        // 同一数据库重启：恢复全部既有模块，缺省模块不重复注入、用户模块不丢失
+        // 同一数据库重启：恢复全部既有模块，缺省模块不重复注入、用户模块不丢失，
+        // 系统模块（不持久化）重新装载
         LoongdServer(0, db).use { server ->
             val (_, body) = get(server.port(), "/modules")
             val names = body.substringAfter('[').substringBefore(']')
                 .split(',').map { it.trim(' ', '"') }.sorted()
-            assertEquals(listOf("demo.busy/v1", "example/v1", "main/v1"), names, body)
+            assertEquals(
+                listOf("demo.busy/v1", "example/v1", "loong.core/v1", "loong.io/v1", "loong.net/v1", "main/v1"),
+                names,
+                body,
+            )
         }
     }
 

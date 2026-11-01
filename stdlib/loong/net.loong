@@ -1,0 +1,220 @@
+module loong.net
+
+external java "dev.loong.runtime.HttpIo" {
+    static function jHttpGet(url: String) -> Result<String, String> as "get"
+    static function jHttpPost(url: String, body: String, contentType: String) -> Result<String, String> as "post"
+}
+
+external java "dev.loong.runtime.TcpIo" {
+    static function jTcpConnect(host: String, port: Int) -> Result<TcpConn, String> as "connect"
+    static function jTcpListen(port: Int) -> Result<TcpServer, String> as "listen"
+}
+
+external java "dev.loong.runtime.TcpConn" {
+    instance function jSend(self: TcpConn, data: String) -> Result<Int, String> as "send"
+    instance function jRecv(self: TcpConn, maxLen: Int) -> Result<String, String> as "recv"
+    instance function jClose(self: TcpConn) -> Unit as "close"
+}
+
+external java "dev.loong.runtime.TcpServer" {
+    instance function jAccept(self: TcpServer) -> Result<TcpConn, String> as "accept"
+    instance function jPort(self: TcpServer) -> Int as "port"
+    instance function jSrvClose(self: TcpServer) -> Unit as "close"
+}
+
+/// Fails the enclosing test when cond is false (v1 has no assert builtin).
+function require(cond: Bool) -> Unit {
+    if !cond {
+        let dead: Int = 1 / 0
+    }
+}
+
+/// Accepts one connection, echoes one message back, returns what it received.
+function echoOnce(srv: TcpServer) -> String {
+    if let Result.Ok(c) = serverAccept(srv) {
+        var got: String = ""
+        if let Result.Ok(m) = connRecv(c, 64) {
+            let snd: Result<Int, String> = connSend(c, m)
+            got = m
+        }
+        connClose(c)
+        return got
+    }
+    return ""
+}
+
+/// GET url; Ok carries the body when 2xx, Err carries transport or HTTP status.
+public function httpGet(url: String) -> Result<String, String> {
+    return jHttpGet(url: url)
+}
+
+/// POST a text body with the given Content-Type; Ok carries the body when 2xx.
+public function httpPost(url: String, body: String, contentType: String) -> Result<String, String> {
+    return jHttpPost(url: url, body: body, contentType: contentType)
+}
+
+/// Connects to host:port; Ok carries the connection handle.
+public function tcpConnect(host: String, port: Int) -> Result<TcpConn, String> {
+    return jTcpConnect(host: host, port: port)
+}
+
+/// Listens on the loopback interface; port 0 lets the OS pick a free one.
+public function tcpListen(port: Int) -> Result<TcpServer, String> {
+    return jTcpListen(port: port)
+}
+
+/// Sends text over the connection; Ok carries the byte count written.
+public function connSend(c: TcpConn, data: String) -> Result<Int, String> {
+    return jSend(self: c, data: data)
+}
+
+/// Receives up to maxLen bytes of text (blocking); Ok("") means peer closed.
+public function connRecv(c: TcpConn, maxLen: Int) -> Result<String, String> {
+    return jRecv(self: c, maxLen: maxLen)
+}
+
+/// Closes the connection (best effort).
+public function connClose(c: TcpConn) -> Unit {
+    return jClose(self: c)
+}
+
+/// Blocks until one connection arrives; Ok carries the connection handle.
+public function serverAccept(srv: TcpServer) -> Result<TcpConn, String> {
+    return jAccept(self: srv)
+}
+
+/// The port actually listened on (useful after tcpListen(0)).
+public function serverPort(srv: TcpServer) -> Int {
+    return jPort(self: srv)
+}
+
+/// Closes the listener (best effort).
+public function serverClose(srv: TcpServer) -> Unit {
+    return jSrvClose(self: srv)
+}
+
+test "httpGet" target: loong.net.httpGet {
+    let r: Result<String, String> = httpGet("http://127.0.0.1:1/")
+    match r {
+        Result.Ok(v) => require(false)
+        Result.Err(e) => require(true)
+    }
+}
+
+test "httpPost" target: loong.net.httpPost {
+    let r: Result<String, String> = httpPost("http://127.0.0.1:1/", "x", "text/plain")
+    match r {
+        Result.Ok(v) => require(false)
+        Result.Err(e) => require(true)
+    }
+}
+
+test "tcpListen" target: loong.net.tcpListen {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        require(p > 0)
+        serverClose(srv)
+    }
+}
+
+test "tcpConnect" target: loong.net.tcpConnect {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        serverClose(srv)
+        let c: Result<TcpConn, String> = tcpConnect("127.0.0.1", p)
+        match c {
+            Result.Ok(v) => require(false)
+            Result.Err(e) => require(true)
+        }
+    }
+}
+
+test "connSend" target: loong.net.connSend {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        let h: Handle<String> = spawn echoOnce(srv: srv)
+        if let Result.Ok(c) = tcpConnect("127.0.0.1", p) {
+            let s: Result<Int, String> = connSend(c, "ping")
+            match s {
+                Result.Ok(n) => require(n == 4)
+                Result.Err(e) => require(false)
+            }
+            connClose(c)
+        }
+        serverClose(srv)
+    }
+}
+
+test "connRecv" target: loong.net.connRecv {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        let h: Handle<String> = spawn echoOnce(srv: srv)
+        if let Result.Ok(c) = tcpConnect("127.0.0.1", p) {
+            let s: Result<Int, String> = connSend(c, "ping")
+            let r: Result<String, String> = connRecv(c, 64)
+            match r {
+                Result.Ok(v) => require(v == "ping")
+                Result.Err(e) => require(false)
+            }
+            connClose(c)
+        }
+        let echoed: String = join h
+        require(echoed == "ping")
+        serverClose(srv)
+    }
+}
+
+test "connClose" target: loong.net.connClose {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        let h: Handle<String> = spawn acceptAndClose2(srv: srv)
+        if let Result.Ok(c) = tcpConnect("127.0.0.1", p) {
+            connClose(c)
+        }
+        serverClose(srv)
+    }
+}
+
+/// Accepts one connection, closes it, returns a placeholder string.
+function acceptAndClose2(srv: TcpServer) -> String {
+    if let Result.Ok(c) = serverAccept(srv) {
+        connClose(c)
+    }
+    return ""
+}
+
+test "serverAccept" target: loong.net.serverAccept {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        let h: Handle<String> = spawn acceptAndClose2(srv: srv)
+        let c: Result<TcpConn, String> = tcpConnect("127.0.0.1", p)
+        match c {
+            Result.Ok(v) => require(true)
+            Result.Err(e) => require(false)
+        }
+        serverClose(srv)
+    }
+}
+
+test "serverPort" target: loong.net.serverPort {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        let p: Int = serverPort(srv)
+        require(p > 0 && p < 65536)
+        serverClose(srv)
+    }
+}
+
+test "serverClose" target: loong.net.serverClose {
+    let lp: Result<TcpServer, String> = tcpListen(0)
+    if let Result.Ok(srv) = lp {
+        serverClose(srv)
+        require(true)
+    }
+}

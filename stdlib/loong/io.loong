@@ -1,0 +1,243 @@
+module loong.io
+
+external java "dev.loong.runtime.FileIo" {
+    static function jReadText(path: String) -> Result<String, String> as "readText"
+    static function jWriteText(path: String, text: String) -> Result<Unit, String> as "writeText"
+    static function jAppendText(path: String, text: String) -> Result<Unit, String> as "appendText"
+    static function jExists(path: String) -> Result<Bool, String> as "exists"
+    static function jIsDir(path: String) -> Result<Bool, String> as "isDir"
+    static function jSize(path: String) -> Result<Int, String> as "size"
+    static function jListDir(path: String) -> Result<Array<String>, String> as "listDir"
+    static function jMkdirs(path: String) -> Result<Unit, String> as "mkdirs"
+    static function jDelete(path: String) -> Result<Bool, String> as "delete"
+    static function jMove(from: String, to: String) -> Result<Unit, String> as "move"
+    static function jJoinPath(a: String, b: String) -> String as "join"
+    static function jTmpDir() -> String as "tmpDir"
+}
+
+/// Fails the enclosing test when cond is false (v1 has no assert builtin).
+function require(cond: Bool) -> Unit {
+    if !cond {
+        let dead: Int = 1 / 0
+    }
+}
+
+/// Reads the whole file as UTF-8 text; Err carries the failure message.
+public function readText(path: String) -> Result<String, String> {
+    return jReadText(path: path)
+}
+
+/// Writes the whole file (truncating); Err carries the failure message.
+public function writeText(path: String, text: String) -> Result<Unit, String> {
+    return jWriteText(path: path, text: text)
+}
+
+/// Appends text, creating the file when absent.
+public function appendText(path: String, text: String) -> Result<Unit, String> {
+    return jAppendText(path: path, text: text)
+}
+
+/// True when the path exists.
+public function exists(path: String) -> Result<Bool, String> {
+    return jExists(path: path)
+}
+
+/// True when the path is a directory.
+public function isDir(path: String) -> Result<Bool, String> {
+    return jIsDir(path: path)
+}
+
+/// File size in bytes.
+public function size(path: String) -> Result<Int, String> {
+    return jSize(path: path)
+}
+
+/// Names of the entries directly under the directory, sorted.
+public function listDir(path: String) -> Result<Array<String>, String> {
+    return jListDir(path: path)
+}
+
+/// Creates the directory and missing parents; already-present is Ok.
+public function mkdirs(path: String) -> Result<Unit, String> {
+    return jMkdirs(path: path)
+}
+
+/// Deletes a file or empty directory; Ok(false) when it was absent.
+public function delete(path: String) -> Result<Bool, String> {
+    return jDelete(path: path)
+}
+
+/// Moves or renames a path.
+public function move(from: String, to: String) -> Result<Unit, String> {
+    return jMove(from: from, to: to)
+}
+
+/// Platform-correct path concatenation (separator chosen by the host OS).
+public function joinPath(a: String, b: String) -> String {
+    return jJoinPath(a: a, b: b)
+}
+
+/// The system temporary directory (home for tests and scratch files).
+public function tmpDir() -> String {
+    return jTmpDir()
+}
+
+test "readText" target: loong.io.readText {
+    let p: String = joinPath(tmpDir(), "loong-io-read.txt")
+    let c: Result<Bool, String> = delete(p)
+    let w: Result<Unit, String> = writeText(p, "hello")
+    let r: Result<String, String> = readText(p)
+    match r {
+        Result.Ok(v) => require(v == "hello")
+        Result.Err(e) => require(false)
+    }
+    let gone: Result<Bool, String> = delete(p)
+    let miss: Result<String, String> = readText(p)
+    match miss {
+        Result.Ok(v) => require(false)
+        Result.Err(e) => require(true)
+    }
+}
+
+test "writeText" target: loong.io.writeText {
+    let p: String = joinPath(tmpDir(), "loong-io-write.txt")
+    let w: Result<Unit, String> = writeText(p, "abc")
+    match w {
+        Result.Ok(v) => require(true)
+        Result.Err(e) => require(false)
+    }
+    let w2: Result<Unit, String> = writeText(p, "de")
+    let r: Result<String, String> = readText(p)
+    match r {
+        Result.Ok(v) => require(v == "de")
+        Result.Err(e) => require(false)
+    }
+}
+
+test "appendText" target: loong.io.appendText {
+    let p: String = joinPath(tmpDir(), "loong-io-append.txt")
+    let d: Result<Bool, String> = delete(p)
+    let a: Result<Unit, String> = appendText(p, "a")
+    let b: Result<Unit, String> = appendText(p, "b")
+    let r: Result<String, String> = readText(p)
+    match r {
+        Result.Ok(v) => require(v == "ab")
+        Result.Err(e) => require(false)
+    }
+}
+
+test "exists" target: loong.io.exists {
+    let p: String = joinPath(tmpDir(), "loong-io-exists.txt")
+    let d: Result<Bool, String> = delete(p)
+    let before: Result<Bool, String> = exists(p)
+    match before {
+        Result.Ok(v) => require(!v)
+        Result.Err(e) => require(false)
+    }
+    let w: Result<Unit, String> = writeText(p, "x")
+    let after: Result<Bool, String> = exists(p)
+    match after {
+        Result.Ok(v) => require(v)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "isDir" target: loong.io.isDir {
+    let dir: String = joinPath(tmpDir(), "loong-io-isdir")
+    let m: Result<Unit, String> = mkdirs(dir)
+    let r: Result<Bool, String> = isDir(dir)
+    match r {
+        Result.Ok(v) => require(v)
+        Result.Err(e) => require(false)
+    }
+    let f: String = joinPath(dir, "f.txt")
+    let w: Result<Unit, String> = writeText(f, "x")
+    let r2: Result<Bool, String> = isDir(f)
+    match r2 {
+        Result.Ok(v) => require(!v)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "size" target: loong.io.size {
+    let p: String = joinPath(tmpDir(), "loong-io-size.txt")
+    let w: Result<Unit, String> = writeText(p, "hello")
+    let s: Result<Int, String> = size(p)
+    match s {
+        Result.Ok(v) => require(v == 5)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "listDir" target: loong.io.listDir {
+    let dir: String = joinPath(tmpDir(), "loong-io-list")
+    let m: Result<Unit, String> = mkdirs(dir)
+    let a: Result<Unit, String> = writeText(joinPath(dir, "a.txt"), "1")
+    let b: Result<Unit, String> = writeText(joinPath(dir, "b.txt"), "2")
+    let r: Result<Array<String>, String> = listDir(dir)
+    match r {
+        Result.Ok(v) => require(len(v) == 2 && v[0] == "a.txt" && v[1] == "b.txt")
+        Result.Err(e) => require(false)
+    }
+}
+
+test "mkdirs" target: loong.io.mkdirs {
+    let dir: String = joinPath(joinPath(tmpDir(), "loong-io-mkdirs"), "nested")
+    let m: Result<Unit, String> = mkdirs(dir)
+    match m {
+        Result.Ok(v) => require(true)
+        Result.Err(e) => require(false)
+    }
+    let again: Result<Unit, String> = mkdirs(dir)
+    let r: Result<Bool, String> = isDir(dir)
+    match r {
+        Result.Ok(v) => require(v)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "delete" target: loong.io.delete {
+    let p: String = joinPath(tmpDir(), "loong-io-delete.txt")
+    let w: Result<Unit, String> = writeText(p, "x")
+    let first: Result<Bool, String> = delete(p)
+    match first {
+        Result.Ok(v) => require(v)
+        Result.Err(e) => require(false)
+    }
+    let second: Result<Bool, String> = delete(p)
+    match second {
+        Result.Ok(v) => require(!v)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "move" target: loong.io.move {
+    let dir: String = joinPath(tmpDir(), "loong-io-move")
+    let m: Result<Unit, String> = mkdirs(dir)
+    let src: String = joinPath(dir, "from.txt")
+    let dst: String = joinPath(dir, "to.txt")
+    let c1: Result<Bool, String> = delete(src)
+    let c2: Result<Bool, String> = delete(dst)
+    let w: Result<Unit, String> = writeText(src, "payload")
+    let mv: Result<Unit, String> = move(src, dst)
+    let a: Result<Bool, String> = exists(src)
+    let b: Result<Bool, String> = exists(dst)
+    match a {
+        Result.Ok(v) => require(!v)
+        Result.Err(e) => require(false)
+    }
+    match b {
+        Result.Ok(v) => require(v)
+        Result.Err(e) => require(false)
+    }
+}
+
+test "joinPath" target: loong.io.joinPath {
+    let j: String = joinPath(tmpDir(), "loong-io-join")
+    require(len(j) > 0)
+}
+
+test "tmpDir" target: loong.io.tmpDir {
+    let t: String = tmpDir()
+    require(len(t) > 0)
+}

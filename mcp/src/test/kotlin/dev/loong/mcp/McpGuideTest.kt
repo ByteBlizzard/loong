@@ -90,8 +90,10 @@ class McpGuideTest {
                 listOf(
                     "loong://guide/quickstart",
                     "loong://guide/grammar",
+                    "loong://guide/interop",
                     "loong://reference/ast-kinds",
                     "loong://reference/diagnostics",
+                    "loong://reference/stdlib",
                     "loong://examples/hello",
                 ),
             ),
@@ -113,10 +115,34 @@ class McpGuideTest {
         assertTrue("E_MISSING_DOC" in diags && "E_NOT_EXHAUSTIVE" in diags, diags.take(200))
         val hello = read("loong://examples/hello")
         assertTrue("Hello , loong!" in hello && "impl Iterable<Int> for Range" in hello, hello.take(200))
+        val interop = read("loong://guide/interop")
+        assertTrue("java_class_info" in interop && "add_jvm_dep" in interop && "陷阱" in interop, interop.take(200))
 
         // 未知 URI 回方法级错误
         val err = s.request("resources/read", """{"uri":"loong://nope"}""")
         assertTrue(err.map.containsKey("error"), err.toString())
+    }
+
+    /** 标准库清单与 stdlib 源同步：每个 public 函数都必须出现在清单文本里（防漂移）。 */
+    @Test
+    fun `stdlib reference covers every public function in stdlib sources`() {
+        val s = Session()
+        val res = s.request("resources/read", """{"uri":"loong://reference/stdlib"}""")
+            .map["result"].let { it as Json.Obj }
+        val text = ((res.map["contents"] as Json.Arr).items[0] as Json.Obj)
+            .let { (it.map["text"] as Json.Str).v }
+
+        val stdlibDir = java.nio.file.Path.of("../stdlib/loong")
+        val publicFns = stdlibDir.toFile().walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".loong") }
+            .flatMap { f ->
+                Regex("""(?m)^public function (\w+)""").findAll(f.readText().replace("\r\n", "\n"))
+            }
+            .map { it.groupValues[1] }
+            .toList()
+        assertTrue(publicFns.size >= 60, "expected a real stdlib surface, got ${publicFns.size}")
+        val missing = publicFns.filter { it !in text }
+        assertTrue(missing.isEmpty(), "stdlib reference missing functions: $missing")
     }
 
     @Test

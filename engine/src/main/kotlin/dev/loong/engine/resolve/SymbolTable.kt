@@ -29,6 +29,7 @@ class SymbolTable {
 
     /**
      * 注册符号。返回冲突的全名（E_DUPLICATE_DECL 用），null 表示成功。
+     * 同一节点的重复注册幂等（recompute 重算同一 link 表时不算冲突）。
      * 短名/相对名冲突不在此报——留给使用点的歧义检查。
      */
     fun register(
@@ -39,8 +40,12 @@ class SymbolTable {
         shortName: String? = null,
         relativeName: String? = null,
     ): String? {
-        val existing = byFull.putIfAbsent(fullName, Symbol(fullName, nodeId, kind, prefixOnly))
-        if (existing != null) return fullName
+        val existing = byFull[fullName]
+        if (existing != null) {
+            // 幂等重注册：同一声明（同节点）的重算；不同节点才是真冲突
+            return if (existing.nodeId == nodeId) null else fullName
+        }
+        byFull[fullName] = Symbol(fullName, nodeId, kind, prefixOnly)
         if (relativeName != null) byRelative[relativeName] = Symbol(fullName, nodeId, kind, prefixOnly)
         if (shortName != null) {
             byShort.getOrPut(shortName) { mutableListOf() }
@@ -52,6 +57,19 @@ class SymbolTable {
     fun lookupFull(name: String): Symbol? = byFull[name] ?: byRelative[name]
 
     fun lookupShort(name: String): List<Symbol> = byShort[name] ?: emptyList()
+
+    /**
+     * 解析期工作副本：Linker 注册的（依赖）符号全部可见，但解析过程中的注册
+     * （CoreSymbols、本模块声明）只落在副本上——共享的 link 表保持纯净，
+     * 重复 recompute 不会累积重复注册，删除声明也不会留下死符号。
+     */
+    internal fun copyForResolve(): SymbolTable {
+        val c = SymbolTable()
+        c.byFull.putAll(byFull)
+        c.byRelative.putAll(byRelative)
+        for ((k, v) in byShort) c.byShort[k] = v.toMutableList()
+        return c
+    }
 }
 
 /** 内建符号：loong.core 的值符号（grammar §4.5.1 预置依赖）。类型名由类型检查阶段处理。 */

@@ -33,12 +33,29 @@ internal object GuideContent {
         - Int/String/Bool/Option 等是 loong.core 库类型而非关键字；
           println/print/concat/str/len/newArray/to32/to64 是内建函数。
 
+        标准库（系统模块，list_modules 可见、不可删）：
+        - loong.core：数值/字符串/Option/Result 工具（min、map、fold、upper…）。
+        - loong.io：文件 I/O——readText/writeText/appendText/exists/isDir/size/listDir/
+          mkdirs/delete/move/joinPath/tmpDir，全部返回 Result<T, String>。
+        - loong.net：HTTP（httpGet/httpPost）与 TCP（tcpConnect/tcpListen/connSend/
+          connRecv/serverAccept…），Err 载荷是错误消息。
+        - 用法：先 `depends loong.io`（add_dependency 或源码 depends 行），再全名调用
+          `loong.io.readText(path: p)`；全量清单见 loong://reference/stdlib。
+
+        调用 JDK / 三方 JVM 库：external java 声明（static/instance/constructor + as 别名）。
+        - 先 java_class_info 查真实签名（int→Int32、long→Int、double→Float…），不要凭记忆猜；
+          装载响应会对声明做反射核对（E_EXTERNAL_CLASS_NOT_FOUND 等）。
+        - 三方 jar 先 add_jvm_dep("group:artifact:version")（或让人类放 libs/）。
+        - 陷阱：loong 无异常——JDK 方法抛出的异常会直接终止进程；会抛异常的 API
+          （文件/网络等）一律走 loong.io/loong.net 包装，不直调。手册见 loong://guide/interop。
+
         标准工作流：get_module_interface（读渲染视图）→ insert_node / edit（响应自带诊断）
         → 诊断清零 → run_tests → request_human_review（需要人类把关时）→ commit。
 
         深入阅读：prompts（write-function / new-module / fix-diagnostics 任务手册）与
         resources（loong://guide/grammar 文法、loong://reference/ast-kinds 节点表、
-        loong://reference/diagnostics 诊断对照、loong://examples/hello 示例）。
+        loong://reference/diagnostics 诊断对照、loong://reference/stdlib 标准库清单、
+        loong://guide/interop JVM 互操作手册、loong://examples/hello 示例）。
     """.trimIndent()
 
     // ---------- prompts（任务手册，按需拉取） ----------
@@ -464,6 +481,148 @@ internal object GuideContent {
             | E_EXTERNAL_CLASS_NOT_FOUND / E_EXTERNAL_METHOD_NOT_FOUND / E_EXTERNAL_DESCRIPTOR_MISMATCH | external 声明与目标类/方法/描述符不符 |
             | E_INVARIANT_VIOLATION | 节点表不变量被破坏（工具链缺陷，非你的错误） |
             | E_INTERNAL | 引擎内部错误（附追踪信息） |
+            """.trimIndent(),
+        ),
+        Resource(
+            "loong://reference/stdlib",
+            "标准库清单",
+            "loong.core / loong.io / loong.net 的全部 public 函数：签名与一句话用途（与 stdlib 源同步）",
+            """
+            # loong 标准库（系统模块清单，与 stdlib 源同步；get_module_interface 可看全文）
+
+            三个系统模块随 daemon 内置（list_modules 可见、不可删）；使用前先声明依赖
+            （`depends loong.io`，add_dependency 工具同理），调用写全名如 `loong.io.readText(path: p)`。
+            loong.core 数十个工具函数另有短名直接可用（如 min、map、upper）。
+
+            ## loong.core — 数值 / 字符串 / Option / Result 工具
+
+            数值：`min(a: Int, b: Int) -> Int`、`max`、`abs(a: Int) -> Int`、
+            `clamp(a: Int, lo: Int, hi: Int) -> Int`、`sign(a: Int) -> Int`、`sqr(a: Int) -> Int`；
+            浮点：`fmin`、`fmax`、`fabs`、`fpow(x: Float, y: Float) -> Float`、
+            `fsqrt(x: Float) -> Float`、`toFloat(v: Int) -> Float`、`round(v: Float) -> Int`、
+            `nearEq(a: Float, b: Float, eps: Float) -> Bool`；除法兜底：
+            `divOr(a: Int, b: Int, def: Int) -> Int`、`modOr`。
+            数组：`map(xs: Array<T>, f: (T) -> U) -> Array<U>`、`filter(xs, p)`、
+            `fold(xs, init, f) -> A`、`sumInt(xs: Array<Int>) -> Int`、`containsInt(xs, v)`。
+            Option：`unwrapOr(o, def)`、`isSome(o)`、`mapOpt(o, f)`；
+            Result：`unwrapOrOk(r, def)`、`isOk(r)`、`mapOk(r, f)`。
+            字符串：`at(s, i)`、`sub(s, from, until)`、`find(s, w)`、`upper(s)`、`lower(s)`、
+            `charStr(c)`、`empty(s)`、`starts(s, p)`、`ends(s, p)`、`trimmed(s)`。
+            字符判定：`isDigit`、`isLetter`、`isSpace`、`isUpper`、`isLower`、`toUpper(c)`、`toLower(c)`。
+
+            ## loong.io — 文件 I/O（UTF-8 文本语义；Err 载荷 = 错误消息）
+
+            | 函数 | 签名 | 说明 |
+            |---|---|---|
+            | readText | `(path: String) -> Result<String, String>` | 读整个文件 |
+            | writeText | `(path: String, text: String) -> Result<Unit, String>` | 覆写整个文件 |
+            | appendText | `(path: String, text: String) -> Result<Unit, String>` | 追加（无则建） |
+            | exists | `(path: String) -> Result<Bool, String>` | 路径存在 |
+            | isDir | `(path: String) -> Result<Bool, String>` | 是否目录 |
+            | size | `(path: String) -> Result<Int, String>` | 字节数 |
+            | listDir | `(path: String) -> Result<Array<String>, String>` | 直接子项名（排序） |
+            | mkdirs | `(path: String) -> Result<Unit, String>` | 递归建目录（幂等） |
+            | delete | `(path: String) -> Result<Bool, String>` | 删文件/空目录（Ok(false)=本不存在） |
+            | move | `(from: String, to: String) -> Result<Unit, String>` | 移动/重命名（目标存在先删） |
+            | joinPath | `(a: String, b: String) -> String` | 平台正确的路径拼接 |
+            | tmpDir | `() -> String` | 系统临时目录 |
+
+            ## loong.net — HTTP 与 TCP（阻塞式：并发用 spawn；Err 载荷 = 错误消息）
+
+            HTTP（JDK HttpClient）：`httpGet(url) -> Result<String, String>`（2xx→Ok(body)，
+            非 2xx→Err("HTTP <status>")）、`httpPost(url, body, contentType) -> Result<String, String>`。
+
+            TCP（回环监听；句柄类型 TcpConn / TcpServer）：`tcpConnect(host, port) -> Result<TcpConn, String>`、
+            `tcpListen(port) -> Result<TcpServer, String>`（port=0 由 OS 分配）、
+            `serverPort(srv) -> Int`、`serverAccept(srv) -> Result<TcpConn, String>`（阻塞）、
+            `serverClose(srv) -> Unit`、`connSend(c, data) -> Result<Int, String>`（Ok=字节数）、
+            `connRecv(c, maxLen) -> Result<String, String>`（阻塞；Ok("")=对端关闭）、
+            `connClose(c) -> Unit`。文本一律 UTF-8（v1 限制，暂无字节级 API）。
+
+            内建函数（无需依赖）：println / print / concat / str / len / newArray / to32 / to64 /
+            tof / send / recv。错误处理模式：
+
+            ```
+            match loong.io.readText(path: "cfg.txt") {
+                Result.Ok(text) => parseCfg(text)
+                Result.Err(e) => Option.None
+            }
+            ```
+            """.trimIndent(),
+        ),
+        Resource(
+            "loong://guide/interop",
+            "JVM 互操作手册",
+            "external java 声明完整写法：类别与 as 别名、类型映射、java_class_info 查询流程、三方 jar 引入与异常陷阱",
+            """
+            # loong ⇄ JVM 互操作手册（external java 声明）
+
+            ## 声明语法（三种调用类别）
+
+            ```
+            external java "java.lang.Math" {
+                static function pow(x: Float, y: Float) -> Float       // invokestatic，符号名与 JVM 名相同
+                static function jround(d: Float) -> Int as "round"     // as 别名：loong 符号名 ≠ JVM 方法名
+            }
+            external java "java.math.BigInteger" {
+                constructor ofStr(s: String)                    // invokespecial <init>；调用写 ofStr("42")
+                instance function toString(self: BigInteger) -> String   // invokevirtual；self 是首参
+            }
+            ```
+
+            - external 方法符号与包装函数同名会撞——惯例：loong 符号 j 前缀（`jReadText`）+
+              `as "readText"` 指回 JVM 名（loong.io 就是这么写的）。
+            - instance 的接收者写 `self: <外部类短名>` 首参；调用 `jSend(self: c, data: d)`。
+            - 外部类型（如 loong.net 的 TcpConn）可直接用在签名里；构造器未声明就不能 new
+              （句柄类只能经工厂函数取得，防直调抛异常）。
+
+            ## 类型映射（external 声明里 loong 类型必须按下表选）
+
+            | JVM | loong | 说明 |
+            |---|---|---|
+            | int | Int32 | 32 位互操作通道；to32/to64 转换 |
+            | long | Int | 默认整数 |
+            | double | Float | |
+            | boolean | Bool | |
+            | char | Char | |
+            | java.lang.String | String | |
+            | void | Unit | |
+            | T[]（元素为引用） | Array<T> | 擦除为 Object[]，元素协变可读 |
+            | dev.loong.runtime.Variant | Option<T> / Result<T, E> | tag Some/None/Ok/Err |
+
+            ## 工作流：查 → 声明 → 修
+
+            1. `java_class_info {"fqn":"java.nio.file.Files"}` 拿真实 public 签名（含构造器/
+               静态/实例方法与参数类型、返回类型；响应附 loongTypes 映射表）。
+            2. 照抄写 external 声明（类型按上表映射，别猜）。
+            3. create_module / edit 的响应自带反射核对：类不在 → E_EXTERNAL_CLASS_NOT_FOUND；
+               方法/参数对不上 → E_EXTERNAL_METHOD_NOT_FOUND（附可用重载清单）；
+               返回类型不符 → E_EXTERNAL_DESCRIPTOR_MISMATCH。照诊断改。
+
+            ## 三方 jar（Maven 生态）
+
+            - `add_jvm_dep {"coordinate":"com.google.code.gson:gson:2.11.0"}`（daemon 委托本机
+              gradle/mvn 解析 classpath；机器没装构建工具时，让人类把 jar 放进项目 `libs/` 目录，
+              效果等价）。`list_jvm_deps` 看现状；`resolve_jvm_deps` 重解析。
+            - 解析成功后 java_class_info 可查三方类；run_tests / build_project 自动带上这些 jar
+              （构建产物复制到 build/libs/ 并以 Class-Path 引用）。
+
+            ## 异常陷阱（最重要的一条）
+
+            loong 没有 try/catch：**external 直调的 JVM 方法一旦抛异常，进程直接终止**。
+
+            - 文件 / 网络 / 时间等 JDK I/O API 几乎全部抛受检异常——一律不要直调；
+              用 loong.io / loong.net 的包装（它们在 runtime shim 里收口异常 → Result）。
+            - 无异常的 API（java.lang.Math、String 方法等）可以直调（loong.core 里已有示范）。
+            - 需要新的会抛异常的 JDK 能力（如 java.time 解析）：不要在业务模块里直调——
+              最小可行做法是只用无异常路径（如 Instant.ofEpochSecond + getEpochSecond），
+              或者请人类在 runtime shim 补一个收口包装（后续会补齐常用面）。
+
+            ## JDK 常用类速查（都可用 java_class_info 查全）
+
+            java.lang.Math（pow/sqrt/max/min/…）、java.lang.String、java.lang.StringBuilder
+            （append/toString 无受检异常）、java.lang.System（currentTimeMillis）；
+            有异常的：java.nio.file.*（走 loong.io）、java.net.*（走 loong.net）。
             """.trimIndent(),
         ),
         Resource(

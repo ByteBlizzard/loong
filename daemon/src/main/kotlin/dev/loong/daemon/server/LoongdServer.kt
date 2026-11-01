@@ -49,7 +49,15 @@ class LoongdServer(
     private val dbRoot: Path = dbPath
     private val regRoot: Path = registryRoot ?: dbPath.resolveSibling("registry")
 
-    private val workspace = Workspace()
+    private val workspace = Workspace(
+        // external java 声明的编译期反射核对：类/方法/描述符对不上当场报 E_EXTERNAL_*，
+        // 而不是运行期 NoSuchMethodError（loader 含 jvm-deps/libs 三方 jar）
+        extraChecks = { table, root ->
+            runCatching {
+                dev.loong.engine.rules.ExternalVerifier.verify(table, root, jvmDeps.loader())
+            }.getOrDefault(emptyList())
+        },
+    )
     private val storage = H2Storage(dbPath)
     private val mutations = Executors.newSingleThreadExecutor { r ->
         Thread(r, "loongd-mutations").apply { isDaemon = false }
@@ -69,17 +77,23 @@ class LoongdServer(
     /** 版本历史（design §8.3 commit/diff/checkout）：模块 → 提交列表（渲染文本快照）。 */
     private val history = HashMap<String, MutableList<Pair<String, String>>>()
 
+    /** JVM 三方依赖（jvm-deps.json + libs/）：java_class_info / 测试 / 构建共用其 classpath。 */
+    private val jvmDeps = JvmDeps(dbPath.parent)
+
     private val reviewLock = Object()
     private val reviews = LinkedHashMap<Long, Review>()
     private var nextReviewId = 1L
 
     init {
-        // 崩溃恢复：启动时装载上次快照并重算
+        // 崩溃恢复：启动时装载上次快照并重算（系统模块不持久化，恢复后再补装）
         runCatching { storage.load() }.getOrNull()?.let {
             runCatching { workspace.restore(it.modules) }
         }
         // 空项目初始化：恢复后仍无任何模块 → 装载缺省的 main 与 example
         DefaultModules.seedIfEmpty(workspace)
+        // 系统模块（loong.core/io/net，daemon 内置资源）装载并接线 depends 解析
+        SystemModules.ensureLoaded(workspace)
+        runCatching { relinkAll() }
         http.executor = Executors.newCachedThreadPool { r ->
             Thread(r, "loongd-http").apply { isDaemon = true }
         }
@@ -97,6 +111,7 @@ class LoongdServer(
         persist()
         http.stop(0)
         storage.close()
+        jvmDeps.close()
         mutations.shutdownNow()
         closed.countDown()
     }
@@ -133,9 +148,51 @@ class LoongdServer(
                 method == "GET" && path == "/modules" ->
                     respondJson(ex, 200, mapOf("modules" to workspace.moduleNames()))
 
+                // 系统模块清单（内置标准库；DELETE/替换均被拒绝，UI 据此打标）
+                method == "GET" && path == "/system-modules" ->
+                    respondJson(ex, 200, mapOf("modules" to SystemModules.names()))
+
+                // JVM 三方依赖：配置（jvm-deps.json）+ 解析状态 + 显式重解析
+                method == "GET" && path == "/jvmdeps" -> respondJson(ex, 200, jvmDepsJson())
+
+                method == "POST" && path == "/jvmdeps" -> {
+                    val body = Json.parse(ex.requestBody.readBytes().decodeToString()) as? Json.Obj
+                        ?: error("request body must be a JSON object")
+                    val coord = bodyString(body, "coordinate")
+                    val r = jvmDeps.add(coord)
+                    broadcast(Json.write(mapOf("type" to "jvmdeps") + jvmDepsJson()))
+                    respondJson(ex, if (r.ok) 200 else 207, jvmDepsJson(r))
+                }
+
+                method == "POST" && path == "/jvmdeps/resolve" -> {
+                    val r = jvmDeps.resolve()
+                    respondJson(ex, if (r.ok) 200 else 207, jvmDepsJson(r))
+                }
+
+                // JVM 类反射查询（external 声明前的「查」）：?fqn=java.nio.file.Files
+                method == "GET" && path == "/jvm/class" -> {
+                    val fqn = ex.requestURI.rawQuery
+                        ?.split("fqn=")?.getOrNull(1)?.substringBefore('&')
+                        ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
+                        ?: error("query parameter 'fqn' required")
+                    respondJson(ex, 200, jvmClassInfo(fqn))
+                }
+
+                path.startsWith("/jvmdeps/") && method == "DELETE" -> {
+                    val coord = path.removePrefix("/jvmdeps/").substringBefore('?')
+                    val r = jvmDeps.remove(coord)
+                    broadcast(Json.write(mapOf("type" to "jvmdeps") + jvmDepsJson()))
+                    respondJson(ex, if (r.ok) 200 else 207, jvmDepsJson(r))
+                }
+
                 method == "POST" && path == "/modules" -> mutate(ex) { body ->
                     val src = bodyString(body, "source")
+                    val declared = SystemModules.declaredName(src)
+                    check(declared == null || !SystemModules.isSystem(declared)) {
+                        "system module '$declared' is built-in and cannot be replaced"
+                    }
                     val m = workspace.load(src)
+                    relinkAll()
                     noteMutation()
                     mapOf(
                         "module" to m.name,
@@ -259,13 +316,21 @@ class LoongdServer(
         when {
             // 整模块卸载（与 POST /modules 对称）：无请求体，走单写者队列并落盘
             method == "DELETE" && segments.size == 1 -> {
-                val result = mutations.submit<Map<String, Any?>> {
-                    workspace.remove(name) ?: error("module '$name' is not loaded")
-                    noteMutation()
-                    mapOf("deleted" to name)
-                }.get()
-                broadcast(Json.write(result + mapOf("module" to name, "type" to "mutation")))
-                respondJson(ex, 200, result)
+                if (SystemModules.isSystem(name)) {
+                    respondJson(
+                        ex, 409,
+                        mapOf("error" to "system module '$name' is built-in and cannot be deleted"),
+                    )
+                } else {
+                    val result = mutations.submit<Map<String, Any?>> {
+                        workspace.remove(name) ?: error("module '$name' is not loaded")
+                        relinkAll()
+                        noteMutation()
+                        mapOf("deleted" to name)
+                    }.get()
+                    broadcast(Json.write(result + mapOf("module" to name, "type" to "mutation")))
+                    respondJson(ex, 200, result)
+                }
             }
 
             // 原始 AST：.loongast 规范导出（ADR-0002，与持久化字节一致）
@@ -311,13 +376,27 @@ class LoongdServer(
                 respondJson(ex, 200, nodeJson(workspace.tableOf(name), NodeId(id)))
             }
 
+            // 节点级渲染（Web UI 原始 AST 树「导出成代码」）：任意节点子树 → 代码文本
+            method == "GET" && segments.size == 4 && segments[1] == "node" && segments[3] == "render" -> {
+                val id = segments[2].toLongOrNull() ?: error("bad node id")
+                val t = workspace.tableOf(name)
+                t.getOrNull(NodeId(id)) ?: error("node $id does not exist in module '$name'")
+                respondText(ex, 200, Renderer(t).renderNode(NodeId(id)))
+            }
+
             method == "POST" && segments.size == 2 && segments[1] == "edit" -> mutate(ex, mapOf("module" to name)) { body ->
+                val depsBefore = dependsNames(name)
                 val outcome = workspace.edit(name) { t -> applyEdit(t, body) }
+                // depends 声明变化 → 自身重链；被本模块依赖的目标变了 → 消费方重链
+                markLinkDirty(name, selfDirty = dependsNames(name) != depsBefore)
+                relinkDirty()
                 noteMutation()
+                // relink 后诊断可能变化（如消费方补 depends 后 E_UNKNOWN_NAME 消除），回传重算结果
+                val fresh = workspace.module(name)
                 mapOf(
                     "value" to outcome.value,
-                    "revision" to outcome.revision,
-                    "diagnostics" to diagnosticsJson(outcome.diagnostics),
+                    "revision" to fresh.revision,
+                    "diagnostics" to diagnosticsJson(fresh.diagnostics),
                 )
             }
 
@@ -377,8 +456,9 @@ class LoongdServer(
                 val id = ((body.map["id"] as? Json.Num)?.v ?: -1L).toInt()
                 val log = history[name] ?: error("no history for $name")
                 if (id < 1 || id > log.size) error("no commit $id")
-                val m = workspace.load(log[id - 1].second)
-                mapOf("checkedOut" to id, "revision" to m.revision)
+                workspace.load(log[id - 1].second)
+                relinkAll()
+                mapOf("checkedOut" to id, "revision" to workspace.module(name).revision)
             }
 
             method == "POST" && segments.size == 2 && segments[1] == "test" -> {
@@ -386,8 +466,13 @@ class LoongdServer(
                 if (m.classes.isEmpty()) {
                     respondJson(ex, 409, mapOf("error" to "module has errors; fix diagnostics before running tests"))
                 } else {
+                    // 跨模块测试：依赖闭包（工作区内含系统模块）字节码 + 注册表 classes 目录 + 三方 jar
                     val runner = TestRunner(workspace.tableOf(name), m.hostClassName)
-                    val results = runner.runTests(m.classes)
+                    val results = runner.runTests(
+                        m.classes,
+                        deps = depClasses(name),
+                        extraClasspath = workspace.classpathDirs(name) + jvmDeps.jars(),
+                    )
                     respondJson(
                         ex, 200,
                         mapOf(
@@ -501,8 +586,96 @@ class LoongdServer(
 
     private fun persist() {
         runCatching {
-            storage.save(WorkspaceSnapshot(workspace.snapshotModules(), workspace.watermark()))
+            // 系统模块不持久化：daemon 升级后资源版即时生效，库中只存项目自身状态
+            val modules = workspace.snapshotModules().filterKeys { !SystemModules.isSystem(it) }
+            storage.save(WorkspaceSnapshot(modules, workspace.watermark()))
         }
+    }
+
+    // ---------- 依赖解析接线（depends 在 daemon 侧真正生效） ----------
+
+    /**
+     * 组合依赖源：工作区模块（含系统模块）优先，本地注册表兜底。
+     * depends 写短名（loong.io）或全名（loong.io/v1）都能命中工作区——
+     * 无版本约束时最低版本 0.0.0 与工作区占位版本匹配。
+     */
+    private fun depSource(): dev.loong.engine.pkg.DepSource {
+        val registry = dev.loong.engine.pkg.LocalRegistry(regRoot)
+        fun lookup(name: String): Pair<NodeTable, NodeId>? {
+            val key = if (name.contains('/')) name else "$name/v1"
+            return runCatching { workspace.tableOf(key) to workspace.rootOf(key) }.getOrNull()
+        }
+        val workspaceSource = dev.loong.engine.pkg.WorkspaceSource { lookup(it) }
+        return object : dev.loong.engine.pkg.DepSource {
+            override fun versions(module: String): List<String> =
+                if (lookup(module) != null) listOf("0.0.0") else registry.versions(module)
+
+            override fun fetch(module: String, version: String): dev.loong.engine.pkg.FetchedDep =
+                if (lookup(module) != null) workspaceSource.fetch(module, version) else registry.fetch(module, version)
+        }
+    }
+
+    /** 链接脏标记：需要重链的模块集合（变更路径单写者线程访问；启动为单线程）。 */
+    private val linkDirty = LinkedHashSet<String>()
+
+    /** 变更后重链全部模块（模块集合变化时用：load/delete/checkout）。 */
+    private fun relinkAll() {
+        linkDirty.addAll(workspace.moduleNames())
+        relinkDirty()
+    }
+
+    /** 只重链脏模块：上次合并的依赖接口节点由 Workspace.linkModules 负责清理。 */
+    private fun relinkDirty() {
+        if (linkDirty.isEmpty()) return
+        val todo = linkDirty.toList()
+        linkDirty.clear()
+        workspace.linkModules(depSource(), todo)
+    }
+
+    /** target 变更后标记：依赖它的模块（传递）需重链；depends 声明变化时自身也重链。 */
+    private fun markLinkDirty(target: String, selfDirty: Boolean) {
+        if (selfDirty) linkDirty.add(target)
+        for (n in workspace.moduleNames()) {
+            if (n != target && depClosure(n).contains(target)) linkDirty.add(n)
+        }
+    }
+
+    /** 模块的依赖闭包（工作区键名，含系统模块；不含自身）。 */
+    private fun depClosure(name: String): List<String> {
+        val seen = LinkedHashSet<String>()
+        seen.add(name)
+        val queue = ArrayDeque<String>()
+        queue.add(name)
+        while (queue.isNotEmpty()) {
+            val cur = queue.removeFirst()
+            val key = if (cur.contains('/')) cur else "$cur/v1"
+            if (key !in workspace.moduleNames()) continue
+            val t = workspace.tableOf(key)
+            for (dep in t.find(Kind.Depends)) {
+                val dn = (t[dep].fields["module_name"] as? FieldValue.Str)?.value ?: continue
+                if (seen.add(dn)) queue.add(dn)
+            }
+        }
+        seen.remove(name)
+        return seen.map { if (it.contains('/')) it else "$it/v1" }
+    }
+
+    /** 模块的 depends 声明签（编辑前后对比，判断自身是否需要重链）。 */
+    private fun dependsNames(name: String): List<String> =
+        workspace.tableOf(name).find(Kind.Depends)
+            .mapNotNull { (workspace.tableOf(name)[it].fields["module_name"] as? FieldValue.Str)?.value }
+            .sorted()
+
+    /** 依赖闭包（工作区内模块，含系统模块）的字节码合并：跨模块测试的运行时 classpath。 */
+    private fun depClasses(name: String): Map<String, ByteArray> {
+        val out = LinkedHashMap<String, ByteArray>()
+        for (key in depClosure(name)) {
+            if (key !in workspace.moduleNames()) continue
+            workspace.module(key).classes.forEach { (internal, bytes) ->
+                if (internal !in out) out[internal] = bytes
+            }
+        }
+        return out
     }
 
     // ---------- 项目构建（design §7 打包形态；产物落项目目录） ----------
@@ -545,9 +718,15 @@ class LoongdServer(
             ?.replace(Regex("[^A-Za-z0-9._-]"), "_")?.takeIf { it.isNotBlank() } ?: "loong-app"
         val jar = buildDir.resolve("$jarName.jar")
         Files.createDirectories(buildDir)
+        // 三方 jar 复制进 build/libs/ 并以相对 Class-Path 引用（java -jar 从 jar 同目录解析；
+        // 不做 fat-jar 合并——保持产物可审计、不破坏签名 jar）
+        val libEntries = JvmDeps.copyIntoBuild(jvmDeps.jars(), buildDir)
         val manifest = Manifest().apply {
             mainAttributes[Attributes.Name.MANIFEST_VERSION] = "1.0"
             if (mainClass != null) mainAttributes[Attributes.Name.MAIN_CLASS] = mainClass
+            if (libEntries.isNotEmpty()) {
+                mainAttributes[Attributes.Name.CLASS_PATH] = libEntries.joinToString(" ")
+            }
         }
         JarOutputStream(Files.newOutputStream(jar), manifest).use { jos ->
             fun put(internal: String, bytes: ByteArray) {
@@ -564,9 +743,70 @@ class LoongdServer(
             "mainClass" to mainClass,
             "classes" to classCount,
             "runtimeClasses" to runtime.size,
+            "jvmLibs" to libEntries,
             "modules" to names,
         )
     }
+
+    /** /jvmdeps 响应体：坐标清单 + 当前生效 jar + 最近一次解析错误。 */
+    private fun jvmDepsJson(last: ResolveResult? = null): Map<String, Any?> =
+        mapOf(
+            "dependencies" to jvmDeps.list(),
+            "jars" to jvmDeps.jars().map { it.fileName.toString() },
+            "resolved" to (last?.ok ?: jvmDeps.resolved()),
+            "tool" to (last?.tool ?: ""),
+            "error" to (last?.error ?: ""),
+        )
+
+    /**
+     * JVM 类的 public API 反射清单（写 external 声明前先查，不靠猜）：
+     * 构造器 / 静态方法 / 实例方法，各带 JVM 参数与返回类型；附 loong 类型映射
+     * 提示（int→Int32、long→Int…——external 声明里类型必须按此写）。
+     */
+    private fun jvmClassInfo(fqn: String): Map<String, Any?> {
+        val cls = try {
+            Class.forName(fqn, false, jvmDeps.loader())
+        } catch (e: Throwable) {
+            return mapOf(
+                "class" to fqn,
+                "found" to false,
+                "hint" to "not on the classpath: JDK classes resolve out of the box; " +
+                    "third-party needs jvm-deps.json (add_jvm_dep) or a jar in libs/",
+            )
+        }
+        fun methodsOf(static: Boolean): List<Map<String, Any?>> =
+            cls.methods.filter { java.lang.reflect.Modifier.isStatic(it.modifiers) == static }
+                .sortedWith(compareBy({ m -> m.name }, { m -> m.parameterCount }))
+                .map { m ->
+                    mapOf(
+                        "name" to m.name,
+                        "params" to m.parameterTypes.map { t -> t.simpleName },
+                        "returns" to m.returnType.simpleName,
+                    )
+                }
+        return mapOf(
+            "class" to fqn,
+            "found" to true,
+            "constructors" to cls.constructors.sortedBy { it.parameterCount }.map {
+                mapOf("params" to it.parameterTypes.map { t -> t.simpleName })
+            },
+            "staticMethods" to methodsOf(static = true),
+            "instanceMethods" to methodsOf(static = false),
+            "loongTypes" to LOONG_TYPE_HINTS,
+        )
+    }
+
+    /** JVM 原始/常用类型 → loong external 声明类型对照（jvmClassInfo 随带，写声明直接照抄）。 */
+    private val LOONG_TYPE_HINTS = mapOf(
+        "int" to "Int32",
+        "long" to "Int",
+        "double" to "Float",
+        "boolean" to "Bool",
+        "char" to "Char",
+        "java.lang.String" to "String",
+        "void" to "Unit",
+        "java.lang.Object" to "Any（类型参数擦除位）",
+    )
 
     /** 模块是否声明了模块级 main 函数（codegen 会为它生成 JVM 入口桥）。 */
     private fun hasMainFunction(name: String): Boolean {

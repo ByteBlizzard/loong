@@ -64,9 +64,15 @@ class EditOutcome<T>(val value: T, val diagnostics: List<Diagnostic>, val revisi
  * 触发该模块的名字解析 → 类型检查 → 强制规则 →（无错误时）字节码生成重算。
  * 多模块依赖图驱动的跨模块失效在 M4 接口 AST 快照加载后接入。
  *
+ * [extraChecks] 为可选的宿主侧附加校验（每次 recompute 后追加诊断）——
+ * daemon 用它注入 external java 声明的反射核对（ExternalVerifier，
+ * ClassLoader 由宿主提供，engine 核心路径保持无类加载依赖）。
+ *
  * 正确性由差分测试保证：编辑后重算 == 渲染文本后全量编译（诊断与字节码一致）。
  */
-class Workspace {
+class Workspace(
+    private val extraChecks: ((NodeTable, NodeId) -> List<Diagnostic>)? = null,
+) {
 
     private val modules = LinkedHashMap<String, ModuleState>()
 
@@ -114,6 +120,7 @@ class Workspace {
         val checker = TypeChecker(m.table, m.link?.externalRoots ?: emptyList())
         diags += checker.check(m.root)
         diags += RulesChecker(m.table).check(m.root)
+        extraChecks?.let { diags += it(m.table, m.root) }
         m.diagnostics = diags
         if (diags.none { it.severity == Severity.Error }) {
             try {
@@ -137,10 +144,23 @@ class Workspace {
         }
     }
 
-    /** 为所有声明了 depends 的模块执行链接（M4）。 */
-    fun linkModules(source: DepSource) {
-        for (name in moduleNames()) {
-            val m = modules[name]!!
+    /**
+     * 执行链接（M4）。[names] 缺省为全部模块；也可只重链受影响子集
+     * （依赖方/依赖目标变更时的增量路径）。
+     *
+     * 每次重链前先删除上次合并进来的依赖接口节点（externalRoots 指向的游离
+     * 子树）——否则重复链接会把依赖声明一遍遍重建进消费方节点表，节点表随
+     * 编辑次数无界膨胀。
+     */
+    fun linkModules(source: DepSource, names: Collection<String>? = null) {
+        val targets = names ?: moduleNames()
+        for (name in targets) {
+            val m = modules[name] ?: continue
+            // 无 depends 且从未链接：链接是空操作，跳过（避免无谓 recompute 抬高 revision）
+            if (m.link == null && m.table.find(dev.loong.engine.ast.Kind.Depends).isEmpty()) continue
+            m.link?.externalRoots?.forEach { root ->
+                if (m.table.getOrNull(root) != null) m.table.delete(root)
+            }
             m.link = Linker.link(m.table, m.root, source)
             recompute(m)
         }
