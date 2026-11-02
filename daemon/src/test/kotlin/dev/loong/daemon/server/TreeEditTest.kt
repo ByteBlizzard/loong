@@ -186,7 +186,117 @@ class TreeEditTest {
         }
     }
 
+    // ---------- 字段 schema：名称 / 必填 / 类型转换（agent 实战踩过的错位） ----------
+
+    private val pathX = """{"kind":"Path","fields":{"written":"x"}}"""
+
+    @Test
+    fun `unknown or missing fields are rejected naming the accepted ones`() {
+        LoongdServer(0, project.resolve("ws.db")).use { server ->
+            val port = server.port()
+            post(port, "/modules", """{"source":"module demo.tree\n"}""")
+            val before = get(port, "/modules/demo.tree%2Fv1/nodes")
+
+            // Path 写 name 而非 written：以前被静默存下、解析报 "unknown name ''"；现在点名拒绝并列出可用字段
+            val badName = fnTree().replace(pathX, """{"kind":"Path","fields":{"name":"x"}}""")
+            val (s1, b1) = post(port, "/modules/demo.tree%2Fv1/tree", """{"trees":[$badName]}""")
+            assertEquals(400, s1, b1)
+            assertTrue("unknown field 'name' for Path" in b1 && "written" in b1, b1)
+            assertTrue("trees[0].kids[2]" in b1, b1) // 节点路径直达出错的 Path
+
+            // 只给派生字段 full_name：缺必填 written（以前被解析器清空后同样报 "unknown name ''"）
+            val noWritten = fnTree().replace(pathX, """{"kind":"Path","fields":{"full_name":"x"}}""")
+            val (s2, b2) = post(port, "/modules/demo.tree%2Fv1/tree", """{"trees":[$noWritten]}""")
+            assertEquals(400, s2, b2)
+            assertTrue("requires field 'written'" in b2, b2)
+
+            // Test 写 target 而非 target_name
+            val badTest = testTree("demo.tree").replace("\"target_name\":", "\"target\":")
+            val (s3, b3) = post(port, "/modules/demo.tree%2Fv1/tree", """{"trees":[${fnTree()},$badTest]}""")
+            assertEquals(400, s3, b3)
+            assertTrue("unknown field 'target' for Test" in b3 && "target_name" in b3, b3)
+
+            // 单节点写入走同一套校验
+            val (s4, b4) = post(
+                port, "/modules/demo.tree%2Fv1/edit",
+                """{"op":"insert","parent":1,"index":0,"kind":"Function","fields":{"name":"f","visibility":"public"}}""",
+            )
+            assertEquals(400, s4, b4)
+            assertTrue("requires field 'return_type'" in b4, b4)
+
+            // 全部零副作用
+            assertEquals(before, get(port, "/modules/demo.tree%2Fv1/nodes"))
+        }
+    }
+
+    @Test
+    fun `numeric literal value is coerced to text and get_node output round-trips`() {
+        LoongdServer(0, project.resolve("ws.db")).use { server ->
+            val port = server.port()
+            post(port, "/modules", """{"source":"module demo.tree\n"}""")
+
+            // value 传 JSON 数字（以前存成 Int：类型检查放行、渲染成空、codegen 在模块根报 E_INTERNAL）
+            val numeric = fnTree().replace("\"value\":\"1\"", "\"value\":1")
+            val (s, b) = post(port, "/modules/demo.tree%2Fv1/tree", """{"trees":[$numeric,${testTree("demo.tree")}]}""")
+            assertEquals(200, s, b)
+            assertTrue("\"diagnostics\":[]" in b, b)
+            val (_, render) = get(port, "/modules/demo.tree%2Fv1/render")
+            assertTrue("x + 1" in render, render)
+            val (_, tb) = post(port, "/modules/demo.tree%2Fv1/test", "{}")
+            assertTrue("\"passed\":1" in tb, tb)
+
+            // get_node 输出 JSON 原生值：字符串/引用 {"r":id}，可原样回写
+            val litId = findNode(port, "demo.tree%2Fv1", "Literal") { "\"value\":\"1\"" in it }
+            val (_, lit) = get(port, "/modules/demo.tree%2Fv1/node/$litId")
+            assertTrue("\"lit_kind\":\"int\"" in lit, lit)
+
+            val pathId = findNode(port, "demo.tree%2Fv1", "Path") { "\"written\":\"x\"" in it }
+            val (_, path) = get(port, "/modules/demo.tree%2Fv1/node/$pathId")
+            assertTrue("\"resolved_id\":{\"r\":" in path, path)
+            assertTrue("Str(value=" !in path && "Ref(id=" !in path, path)
+
+            // 把 get_node 读出的 fields（含解析填充字段）原样喂回 replace_tree：接受，且仍绿
+            val fields = Regex("\"fields\":(\\{[^}]*\\{[^}]*\\}[^}]*\\}|\\{[^}]*\\})").find(path)!!.groupValues[1]
+            val (rs, rb) = post(
+                port, "/modules/demo.tree%2Fv1/tree",
+                """{"id":$pathId,"tree":{"kind":"Path","fields":$fields}}""",
+            )
+            assertEquals(200, rs, rb)
+            assertTrue("\"diagnostics\":[]" in rb, rb)
+        }
+    }
+
+    @Test
+    fun `replace op validates merged fields against the target kind`() {
+        LoongdServer(0, project.resolve("ws.db")).use { server ->
+            val port = server.port()
+            post(port, "/modules", """{"source":"module demo.tree\n"}""")
+            val (_, b1) = post(port, "/modules/demo.tree%2Fv1/tree", """{"trees":[${fnTree()},${testTree("demo.tree")}]}""")
+            val testId = Regex("\"ids\":\\[\\d+,(\\d+)").find(b1)!!.groupValues[1]
+            val litId = findNode(port, "demo.tree%2Fv1", "Literal") { "\"value\":\"1\"" in it }
+
+            // 未知字段按目标节点 kind 拒绝
+            val (s1, r1) = post(port, "/modules/demo.tree%2Fv1/edit", """{"op":"replace","id":$testId,"fields":{"target":"demo.tree.incr"}}""")
+            assertEquals(400, s1, r1)
+            assertTrue("unknown field 'target' for Test" in r1, r1)
+
+            // 合法合并：Literal.value 给数字也转成文本，渲染与测试都反映新值
+            val (s2, r2) = post(port, "/modules/demo.tree%2Fv1/edit", """{"op":"replace","id":$litId,"fields":{"value":2}}""")
+            assertEquals(200, s2, r2)
+            assertTrue("\"diagnostics\":[]" in r2, r2)
+            val (_, render) = get(port, "/modules/demo.tree%2Fv1/render")
+            assertTrue("x + 2" in render, render)
+        }
+    }
+
     // ---------- HTTP 小件 ----------
+
+    /** 按 kind 列出节点，挑出 node JSON 满足 [pick] 的第一个 id。 */
+    private fun findNode(port: Int, module: String, kind: String, pick: (String) -> Boolean): String {
+        val (_, list) = get(port, "/modules/$module/nodes?kind=$kind")
+        return Regex("\"id\":(\\d+)").findAll(list).map { it.groupValues[1] }
+            .first { id -> pick(get(port, "/modules/$module/node/$id").second) }
+    }
 
     private fun get(port: Int, path: String): Pair<Int, String> =
         client.send(

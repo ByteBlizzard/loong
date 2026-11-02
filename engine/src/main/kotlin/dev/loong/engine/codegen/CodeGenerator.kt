@@ -12,7 +12,8 @@ import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 
-class CodegenException(message: String) : RuntimeException(message)
+/** codegen 失败；[node] 给出时诊断定位到该节点而非模块根。 */
+class CodegenException(message: String, val node: NodeId? = null) : RuntimeException(message)
 
 /**
  * JVM 字节码生成器（plan.md M1 第 8 步；design §5.1/§6）。
@@ -1194,8 +1195,8 @@ class CodeGenerator(
     private fun compileLiteral(e: NodeId, ctx: FnCtx) {
         val mv = ctx.mv
         when (fs(e, "lit_kind")) {
-            "int" -> mv.visitLdcInsn(parseLong(fs(e, "value")))
-            "float" -> mv.visitLdcInsn(fs(e, "value").toDouble())
+            "int" -> mv.visitLdcInsn(numberOf(e) { parseLong(it) })
+            "float" -> mv.visitLdcInsn(numberOf(e) { it.toDouble() })
             "bool" -> mv.visitInsn(if (fs(e, "value") == "true") Opcodes.ICONST_1 else Opcodes.ICONST_0)
             "string" -> mv.visitLdcInsn(cookString(fs(e, "value")))
             "char" -> pushInt(mv, cookChar(fs(e, "value")).code)
@@ -1236,6 +1237,16 @@ class CodeGenerator(
     private fun parseLong(text: String): Long =
         if (text.startsWith("0x") || text.startsWith("0X")) java.lang.Long.parseLong(text.substring(2), 16)
         else text.toLong()
+
+    /** 数字字面量取值：文本不合法时点名字面量节点（TypeChecker 已前置拦截，此为兜底）。 */
+    private inline fun <T : Any> numberOf(e: NodeId, parse: (String) -> T): T {
+        val text = fs(e, "value")
+        return try {
+            parse(text)
+        } catch (ex: NumberFormatException) {
+            throw CodegenException("invalid ${fs(e, "lit_kind")} literal '$text'", node = e)
+        }
+    }
 
     private fun cookChar(raw: String): Char = when {
         raw.length == 1 -> raw[0]

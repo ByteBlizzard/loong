@@ -443,7 +443,7 @@ internal object GuideContent {
             | Test | name、target_name(源文本全名) | DocComment?, Block |
             | DocComment | text | — |
             | ExternalClass | class_fqn | ExternalMethod* |
-            | ExternalMethod | name、call_kind(static/instance/constructor)、return_type | DocComment?, TypeParam*, Param* |
+            | ExternalMethod | name、call_kind(static/instance/constructor)、return_type、jvm_name?(JVM 方法名别名) | DocComment?, TypeParam*, Param* |
 
             ## 语句类
 
@@ -516,6 +516,21 @@ internal object GuideContent {
             - 点链 `a.b.c` 是单个 Path（written="a.b.c"）；FieldAccess 仅当接收者不是 Path。
             - 块值 = 末位子节点恰为 ExprStmt 时的其表达式，无尾表达式则块值为 Unit。
             - Test.target_id 由名字解析填充，编辑时只写 target_name。
+
+            ## 字段规格（写入时强制；违反 = 整批拒绝并列出该 kind 的可用字段）
+
+            本表的 fields 列同样是可执行 schema（list_ast_kinds 的 fields 列为机器可查版）：
+
+            - **字段名必须在表内**：写 `name` 而非 `written`、写 `full_name` 而非 `written`
+              都会被拒绝并提示可用字段——不会再被静默忽略。
+            - **非 `?` 字段必填**（Let 的 mutable/shared 例外：缺省 false）；标量 Literal 必须带 value。
+            - **值类型按规格转换**：str 字段接受 string/number/boolean 并取其文本——
+              `Literal.value` 写 `7` 与 `"7"` 等价，但规范形态是字符串（源文本）；
+              bool 字段接受 boolean 或 "true"/"false"；ref 字段接受 {"r": id} 或裸 id，且节点必须存在。
+            - **解析填充字段**（Path.full_name/resolved_id、Test.target_id）输入可带（get_node 输出
+              可原样回写），但一律由名字解析阶段重算——不要靠它们代替 written/target_name。
+            - 数字字面量的 value 文本必须可解析（int：十进制或 0x 十六进制；float：小数/指数），
+              否则报 E_INVALID_NUMBER 并定位到该 Literal。
             """.trimIndent(),
         ),
         Resource(

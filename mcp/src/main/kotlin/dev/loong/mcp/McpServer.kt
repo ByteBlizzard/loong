@@ -250,10 +250,12 @@ class McpSession(
         },
         Tool(
             "list_ast_kinds",
-            "AST 节点种类总表：每个 kind 的 kids 形态约束（结构不变量——违反会被 " +
+            "AST 节点种类总表：每个 kind 的 fields 规格（字段名/类型/必填/解析填充——写入时" +
+                "未知字段、缺必填、类型不符都会被整批拒绝）、kids 形态约束（结构不变量——违反会被 " +
                 "insert_tree/replace_tree/create_module 整批拒绝，或报 E_INVARIANT_VIOLATION）" +
                 "与类别（declaration/statement/expression）。写树前查这张表，" +
-                "不要用 get_node 逆向工程。关键陷阱：else 只认 If 的第 3 槽（Block 或 If）；" +
+                "不要用 get_node 逆向工程。关键陷阱：Path 只写 written（源文本路径，不是 name）；" +
+                "Literal.value 恒为字符串（整数也写 \"7\"）；else 只认 If 的第 3 槽（Block 或 If）；" +
                 "While/For 的第 2 kid 必须是 Block（循环语句挂 Block 里）；Binary/Assign 恰两个 kid；" +
                 "MatchArm 体恰一个 kid（Return 等语句须包在 Block 里）。" +
                 "配套人类可读版：resource loong://reference/ast-kinds。",
@@ -261,7 +263,12 @@ class McpSession(
             Json.write(
                 mapOf(
                     "kinds" to dev.loong.engine.rules.StructuralInvariants.KIND_SPEC.map { (k, kids, cat) ->
-                        mapOf("kind" to k.name, "category" to cat, "kids" to kids)
+                        mapOf(
+                            "kind" to k.name,
+                            "category" to cat,
+                            "fields" to dev.loong.engine.rules.FieldSchema.describe(k),
+                            "kids" to kids,
+                        )
                     },
                 ),
             )
@@ -348,8 +355,10 @@ class McpSession(
             "一次写入一棵或多棵嵌套节点树——日常写代码的主路径：整个函数（DocComment + " +
                 "Param* + Block + 表达式）、配套 Test、struct/impl/external 块，一次调用全部入库。" +
                 "树形态与 get_node 输出同构：{kind, fields, kids}；fields 值 string/number/boolean/" +
-                "{\"r\":节点id}。应用前逐节点校验，任何形态错误整批拒绝并给出节点路径" +
-                "（如 trees[0].kids[1]），零副作用。写函数的完整树模板见 prompt write-function。",
+                "{\"r\":节点id}，字段名以 list_ast_kinds 为准（未知字段、缺必填整批拒绝并列出可用字段）。" +
+                "两个最常错的字段：Path 写 written（源文本路径）；Literal 写 lit_kind + value（value 恒为" +
+                "字符串，整数也写 \"7\"——写数字会自动转成文本）。应用前逐节点校验，任何形态错误整批" +
+                "拒绝并给出节点路径（如 trees[0].kids[1]），零副作用。写函数的完整树模板见 prompt write-function。",
             schema(
                 prop("module", "string", "模块全名"),
                 prop("tree", "object", "单棵树 {kind,fields,kids}（与 trees 二选一）"),
@@ -405,7 +414,7 @@ class McpSession(
                 "（补一个 Param、插一条语句）；成片产出用 insert_tree（一次整棵树），" +
                 "多点改动用 batch_edit——不要用它逐节点搭声明。" +
                 "注意：DocComment 必须是声明的第一个子节点（index 0）；" +
-                "fields 形态见 resource loong://reference/ast-kinds。",
+                "fields 规格以 list_ast_kinds 为准（或 resource loong://reference/ast-kinds）。",
             schema(
                 prop("module", "string", "模块全名"),
                 prop("parent", "integer", "父节点 ID（模块级声明挂 Module 根 = 1）"),

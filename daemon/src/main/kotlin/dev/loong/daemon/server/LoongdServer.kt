@@ -11,6 +11,7 @@ import dev.loong.engine.ast.NodeTable
 import dev.loong.engine.diagnostics.Diagnostic
 import dev.loong.engine.diagnostics.Severity
 import dev.loong.engine.json.Json
+import dev.loong.engine.rules.FieldSchema
 import dev.loong.engine.storage.LoongastCodec
 import dev.loong.engine.storage.WorkspaceSnapshot
 import dev.loong.engine.testrunner.TestRunner
@@ -616,34 +617,24 @@ class LoongdServer(
         fun kind(): Kind = Kind.entries.firstOrNull {
             it.name == (body.map["kind"] as? Json.Str)?.v
         } ?: error("unknown kind ${(body.map["kind"] as? Json.Str)?.v}")
-        fun fields(): Map<String, FieldValue> {
-            val obj = body.map["fields"] as? Json.Obj ?: return emptyMap()
-            val out = HashMap<String, FieldValue>()
-            obj.map.forEach { (k, v) ->
-                out[k] = when (v) {
-                    is Json.Str -> FieldValue.Str(v.v)
-                    is Json.Bool -> FieldValue.Bool(v.v)
-                    is Json.Num -> FieldValue.Int(v.v)
-                    is Json.Obj -> (v.map["r"] as? Json.Str)?.let { FieldValue.Ref(NodeId(it.v.toLong())) }
-                        ?: error("field object must be {\"r\": id}")
-                    else -> error("unsupported field value")
-                }
-            }
-            return out
-        }
+        fun fieldsObj(): Json.Obj? = body.map["fields"] as? Json.Obj
         return when (op) {
-            "create" -> t.create(kind(), fields()).value
-            "insert" -> t.insert(id("parent"), index(), kind(), fields()).value
+            "create" -> t.create(kind(), fieldsOf(t, kind(), fieldsObj(), "fields", requireAll = true)).value
+            "insert" -> t.insert(id("parent"), index(), kind(), fieldsOf(t, kind(), fieldsObj(), "fields", requireAll = true)).value
             "attach" -> t.attach(id("id"), id("parent"), index()).map { it.value }
             "replace" -> {
                 val kids = (body.map["kids"] as? Json.Arr)?.items
                     ?.map { NodeId((it as Json.Str).v.toLong()) }
                 // fields 为合并语义（与 replace_node 工具描述一致：可只给要改的键）；
-                // 给 kids 则整组子节点替换（NodeTable.replace 自身语义）
-                val f = fields()
+                // 给 kids 则整组子节点替换（NodeTable.replace 自身语义）。
+                // 字段按目标节点的 kind 校验：未知字段拒绝；合并后仍缺必填/类型不符也拒绝。
                 val target = id("id")
-                val merged: Map<String, FieldValue>? =
-                    if (f.isEmpty()) null else (t.getOrNull(target)?.fields?.plus(f) ?: f)
+                val existing = t.getOrNull(target) ?: error("node $target does not exist in this module")
+                val f = fieldsOf(t, existing.kind, fieldsObj(), "fields", requireAll = false)
+                val merged: Map<String, FieldValue>? = if (f.isEmpty()) null else existing.fields + f
+                if (merged != null) {
+                    FieldSchema.problemsOf(existing.kind, merged).firstOrNull()?.let { error("fields: $it") }
+                }
                 t.replace(target, merged, kids).map { it.value }
             }
             "move" -> t.move(id("id"), id("newParent"), index()).map { it.value }
@@ -659,18 +650,17 @@ class LoongdServer(
         RuntimeException("$path: $reason")
 
     /**
-     * 纯校验（不触碰节点表）：kind 合法、fields 值形态（str/num/bool/{"r":id}，
-     * ref 必须指向目标表现存节点）、**结构不变量**（kids 数量与容器槽位，
-     * 与重算门禁/文档同一张表）、kids 递归。任何失败抛 [TreeShapeException]。
-     * 构建期（[buildTree]）在此之后执行，形态上不可能再失败——两阶段保证
-     * 「校验失败零副作用」（不会留下半建的游离子树）。
+     * 纯校验（不触碰节点表）：kind 合法、fields（名称/值形态/必填，见 [fieldsOf]）、
+     * **结构不变量**（kids 数量与容器槽位，与重算门禁/文档同一张表）、kids 递归。
+     * 任何失败抛 [TreeShapeException]。构建期（[buildTree]）在此之后执行，形态上
+     * 不可能再失败——两阶段保证「校验失败零副作用」（不会留下半建的游离子树）。
      */
     private fun validateTree(t: NodeTable, node: Json.Obj, path: String) {
         val kindName = (node.map["kind"] as? Json.Str)?.v
             ?: throw TreeShapeException(path, "missing 'kind'")
         val kind = Kind.entries.firstOrNull { it.name == kindName }
             ?: throw TreeShapeException(path, "unknown kind '$kindName'")
-        treeFieldsOf(t, node, path)
+        fieldsOf(t, kind, node.map["fields"] as? Json.Obj, path, requireAll = true)
         val kidObjs = (node.map["kids"] as? Json.Arr)?.items
             ?: emptyList()
         kidObjs.forEachIndexed { i, kid ->
@@ -692,28 +682,61 @@ class LoongdServer(
         }
     }
 
-    /** 树节点 fields → FieldValue（值形态与 ref 存在性校验）。 */
-    private fun treeFieldsOf(t: NodeTable, node: Json.Obj, path: String): Map<String, FieldValue> {
-        val out = HashMap<String, FieldValue>()
-        (node.map["fields"] as? Json.Obj)?.map?.forEach { (k, v) ->
-            out[k] = when (v) {
-                is Json.Str -> FieldValue.Str(v.v)
-                is Json.Bool -> FieldValue.Bool(v.v)
-                is Json.Num -> FieldValue.Int(v.v)
-                is Json.Obj -> {
-                    val r = (v.map["r"] as? Json.Num)?.let { NodeId(it.v) }
-                        ?: (v.map["r"] as? Json.Str)?.let { NodeId(it.v.toLong()) }
-                        ?: throw TreeShapeException("$path.fields.$k", "field object must be {\"r\": <id>}")
+    /**
+     * JSON fields → FieldValue，按 [FieldSchema] 校验与转换（树写入与单节点写入共用）：
+     * - 未知字段 → 拒绝并列出该 kind 的可用字段（根治「写了 name 而非 written、被静默忽略」）；
+     * - 值按规格转换：str 规格接受 string/number/boolean 并取其文本——Literal.value 写 7 与
+     *   "7" 等价（存成 Int 会让 Renderer/codegen 读到空串）；bool 规格接受 boolean 或
+     *   "true"/"false"；ref 规格接受 {"r": id} 或裸 id，且必须指向目标表现存节点；
+     * - [requireAll] 时缺必填 → 拒绝（create/insert/树节点）；replace 的合并语义由调用方合并后再查。
+     */
+    private fun fieldsOf(
+        t: NodeTable,
+        kind: Kind,
+        obj: Json.Obj?,
+        path: String,
+        requireAll: Boolean,
+    ): Map<String, FieldValue> {
+        val given = obj?.map ?: emptyMap<String, Json.Value>()
+        FieldSchema.unknownFields(kind, given.keys).firstOrNull()?.let { bad ->
+            throw TreeShapeException(
+                "$path.fields.$bad",
+                "unknown field '$bad' for $kind; accepted: ${FieldSchema.describe(kind)}",
+            )
+        }
+        val out = LinkedHashMap<String, FieldValue>()
+        for ((k, v) in given) {
+            val spec = FieldSchema.specOf(kind, k) ?: continue
+            out[k] = when (spec.type) {
+                FieldSchema.Type.Str -> when (v) {
+                    is Json.Str -> FieldValue.Str(v.v)
+                    is Json.Num -> FieldValue.Str(v.v.toString())
+                    is Json.Bool -> FieldValue.Str(v.v.toString())
+                    else -> throw TreeShapeException("$path.fields.$k", "$kind.$k must be a string")
+                }
+                FieldSchema.Type.Bool -> when {
+                    v is Json.Bool -> FieldValue.Bool(v.v)
+                    v is Json.Str && v.v == "true" -> FieldValue.Bool(true)
+                    v is Json.Str && v.v == "false" -> FieldValue.Bool(false)
+                    else -> throw TreeShapeException("$path.fields.$k", "$kind.$k must be a boolean")
+                }
+                FieldSchema.Type.Ref -> {
+                    val r = when (v) {
+                        is Json.Num -> NodeId(v.v)
+                        is Json.Obj -> (v.map["r"] as? Json.Num)?.let { NodeId(it.v) }
+                            ?: (v.map["r"] as? Json.Str)?.let { NodeId(it.v.toLong()) }
+                            ?: throw TreeShapeException("$path.fields.$k", "$kind.$k must be {\"r\": <id>}")
+                        else -> throw TreeShapeException("$path.fields.$k", "$kind.$k must be {\"r\": <id>}")
+                    }
                     if (t.getOrNull(r) == null) {
                         throw TreeShapeException("$path.fields.$k", "ref ${r.value} does not exist in this module")
                     }
                     FieldValue.Ref(r)
                 }
-                else -> throw TreeShapeException(
-                    "$path.fields.$k",
-                    "unsupported field value; use string / number / boolean / {\"r\": id}",
-                )
             }
+        }
+        if (requireAll) {
+            FieldSchema.problemsOf(kind, out).firstOrNull()?.let { throw TreeShapeException(path, it) }
         }
         return out
     }
@@ -722,7 +745,8 @@ class LoongdServer(
     private fun buildTree(t: NodeTable, node: Json.Obj): NodeId {
         val kids = ((node.map["kids"] as? Json.Arr)?.items ?: emptyList())
             .map { buildTree(t, it as Json.Obj) }
-        return t.create(kindOf(node), treeFieldsOf(t, node, ""), kids)
+        val kind = kindOf(node)
+        return t.create(kind, fieldsOf(t, kind, node.map["fields"] as? Json.Obj, "", requireAll = false), kids)
     }
 
     private fun kindOf(node: Json.Obj): Kind =
@@ -785,9 +809,12 @@ class LoongdServer(
                 val tree = op.map["tree"] as? Json.Obj ?: error("replace_tree requires 'tree'")
                 validateTree(t, tree, "tree")
                 t.getOrNull(target) ?: error("node $target does not exist in this module")
+                val kind = kindOf(tree)
                 val kids = ((tree.map["kids"] as? Json.Arr)?.items ?: emptyList())
                     .map { buildTree(t, it as Json.Obj) }
-                t.replace(target, treeFieldsOf(t, tree, "tree").ifEmpty { null }, kids)
+                // 整棵换新：kind/fields 以 tree 为准（fields 整组替换，不与旧值合并——
+                // 过期的解析填充字段随之清除，由名字解析阶段重算）
+                t.replace(target, fieldsOf(t, kind, tree.map["fields"] as? Json.Obj, "tree", requireAll = false), kids, kind)
                 target.value
             }
             else -> applyEdit(t, op)
@@ -1134,15 +1161,27 @@ class LoongdServer(
     private fun diagnosticsJson(diags: List<dev.loong.engine.diagnostics.Diagnostic>) =
         diags.map { mapOf("code" to it.code, "message" to it.message, "node" to it.nodeId.value) }
 
+    /**
+     * 节点 JSON（get_node / find_nodes）。fields 值与写入形态同构：str → 字符串、
+     * bool → 布尔、int → 数字、ref → {"r": id}——读出的 fields 可原样喂回
+     * insert_tree / replace_tree / replace_node。
+     */
     private fun nodeJson(t: NodeTable, id: NodeId): Map<String, Any?> {
         val n = t[id]
         return mapOf(
             "id" to n.id.value,
             "kind" to n.kind.name,
-            "fields" to n.fields.entries.sortedBy { it.key }.associate { (k, v) -> k to v.toString() },
+            "fields" to n.fields.entries.sortedBy { it.key }.associate { (k, v) -> k to fieldJson(v) },
             "kids" to n.kids.map { it.value },
             "parent" to n.parent.value,
         )
+    }
+
+    private fun fieldJson(v: FieldValue): Any = when (v) {
+        is FieldValue.Str -> v.value
+        is FieldValue.Bool -> v.value
+        is FieldValue.Int -> v.value
+        is FieldValue.Ref -> mapOf("r" to v.id.value)
     }
 
     private fun bodyString(body: Json.Obj, key: String): String =

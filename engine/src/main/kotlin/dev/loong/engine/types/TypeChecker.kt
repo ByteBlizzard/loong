@@ -721,8 +721,8 @@ class TypeChecker(
     }
 
     private fun literalType(e: NodeId, expected: LoongType? = null): LoongType = when (fs(e, "lit_kind")) {
-        "int" -> INT
-        "float" -> FLOAT
+        "int" -> { checkNumberText(e, isFloat = false); INT }
+        "float" -> { checkNumberText(e, isFloat = true); FLOAT }
         "bool" -> BOOL
         "string" -> STRING
         "char" -> CHAR
@@ -1337,6 +1337,26 @@ class TypeChecker(
             anchor, Severity.Error, DiagCodes.E_ARITY_MISMATCH,
             "expected $expected argument(s) but got $actual",
         )
+    }
+
+    /**
+     * 数字字面量的 value 文本必须能按 codegen 的规则解析（int：十进制或 0x 十六进制；
+     * float：Double 文本）。词法器产出天然合法；树写入可能带任意文本——在这里点名
+     * 字面量节点，而不是等 codegen 抛 NumberFormatException 归到模块根。
+     */
+    private fun checkNumberText(e: NodeId, isFloat: Boolean) {
+        val text = fs(e, "value")
+        val ok = when {
+            isFloat -> text.toDoubleOrNull() != null
+            text.startsWith("0x") || text.startsWith("0X") -> text.substring(2).toLongOrNull(16) != null
+            else -> text.toLongOrNull() != null
+        }
+        if (!ok) {
+            diags += Diagnostic(
+                e, Severity.Error, DiagCodes.E_INVALID_NUMBER,
+                "invalid ${if (isFloat) "float" else "int"} literal '$text' (value must be the number's source text)",
+            )
+        }
     }
 
     private fun fb(id: NodeId, key: String): Boolean =

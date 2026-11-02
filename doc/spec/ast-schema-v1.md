@@ -46,6 +46,7 @@ Node {
 7. **点链单 Path**：表达式中的 `a.b.c` 解析为单个 `Path`（written = `"a.b.c"`）；拆分为 `FieldAccess` 链是名字解析阶段的职责（grammar §4.2）。仅当点链接收者不是 Path（`arr[0].x`、`f(c).x`）时解析器直接产生 `FieldAccess`。
 8. **块尾表达式的表示**：块值 = 末位子节点恰为 `ExprStmt` 时其表达式（无尾表达式的块值为 `Unit`）。不设专门的"尾表达式"节点。
 9. **impl 函数符号全名挂接口全名下**（如 `org.example.geom.Shape.area`），供名字解析注册符号表。
+10. **字段 schema 可执行**（`engine/.../rules/FieldSchema.kt`，与 §4 字段列一一对应）：非 `?` 字段必填（`Let.mutable`/`shared` 缺失按 false 读，不设必填）；值类型按 §2 的 `Str`/`Bool`/`Ref` 强制。daemon 写入路径（树与单节点）按此拒绝未知字段、缺必填与类型不符，并在错误里列出该 kind 的可用字段；`Workspace.recompute` 门禁对缺必填/类型不符报 `E_INVARIANT_VIOLATION` 点名节点（容忍额外键）。`Literal.value` 恒为源文本字符串——写入端给数字时转为其文本，不落 `Int`。
 
 ## 4. Kind 清单
 
@@ -69,7 +70,7 @@ Node {
 | `Test` | `name`、`target_name`(str, 源文本全名)、`target_id`?(Ref→Function, 解析填充) | `DocComment`?, `Block` |
 | `DocComment` | `text`(str, 连续 `///` 行合并) | — |
 | `ExternalClass` | `class_fqn`(str) | `ExternalMethod`* |
-| `ExternalMethod` | `name`、`call_kind`(str: `static`\|`instance`\|`constructor`)、`return_type` | `DocComment`?, `TypeParam`*, `Param`* |
+| `ExternalMethod` | `name`、`call_kind`(str: `static`\|`instance`\|`constructor`)、`return_type`、`jvm_name`?(str, JVM 方法名别名；`as "jvmName"` 语法，符号名与 JVM 名分离) | `DocComment`?, `TypeParam`*, `Param`* |
 
 ### 4.2 语句类
 

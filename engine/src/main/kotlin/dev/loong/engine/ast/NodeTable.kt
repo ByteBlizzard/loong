@@ -100,13 +100,14 @@ class NodeTable(val allocator: IdAllocator = IdAllocator()) {
     }
 
     /**
-     * 原地替换字段与/或子节点：旧子树整体删除，新 kids 必须游离（由本操作收养）。
+     * 原地替换字段与/或子节点（可一并换 kind）：旧子树整体删除，新 kids 必须游离（由本操作收养）。
      * 节点 ID 不变——这正是 AI「修改节点 f3a2」的语义。
      */
     fun replace(
         id: NodeId,
         fields: Map<String, FieldValue>? = null,
         kids: List<NodeId>? = null,
+        kind: Kind? = null,
     ): Set<NodeId> {
         val node = get(id)
         if (kids != null) {
@@ -120,6 +121,7 @@ class NodeTable(val allocator: IdAllocator = IdAllocator()) {
             }
         }
         nodes[id] = node.copy(
+            kind = kind ?: node.kind,
             fields = fields ?: node.fields,
             kids = kids ?: node.kids,
         )

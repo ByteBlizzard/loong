@@ -186,7 +186,7 @@ class Workspace(
                 m.hostClassName = gen.hostClassOf()
             } catch (e: CodegenException) {
                 m.diagnostics = diags + Diagnostic(
-                    m.root, Severity.Error, "E_INTERNAL", "codegen failure: ${e.message}",
+                    e.node ?: m.root, Severity.Error, "E_INTERNAL", "codegen failure: ${e.message}",
                 )
                 m.classes = emptyMap()
             } catch (e: Exception) {

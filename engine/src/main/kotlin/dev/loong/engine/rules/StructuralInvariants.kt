@@ -187,13 +187,20 @@ object StructuralInvariants {
 
     private infix fun Int.atMost(n: Int): Int? = if (this > n) this else null
 
-    /** 全表结构检查（含游离节点）：返回 (节点, 违例描述) 列表，空 = 通过。 */
+    /**
+     * 全表结构检查（含游离节点）：返回 (节点, 违例描述) 列表，空 = 通过。
+     * kids 形态（[problemOf]）与字段类型/必填（[FieldSchema.problemsOf]）一起查——
+     * 后者兜住「Literal.value 存成 Int」「Path 缺 written」这类写入错位，
+     * 在名字解析/codegen 之前就点名到具体节点，而不是等到 codegen 以
+     * E_INTERNAL 报在模块根上。
+     */
     fun check(table: NodeTable): List<Pair<NodeId, String>> {
         val problems = ArrayList<Pair<NodeId, String>>()
         for (node in table.ids) {
             val n = table[node]
             val litKind = (n.fields["lit_kind"] as? FieldValue.Str)?.value
             problemOf(n.kind, n.kids.map { table[it].kind }, litKind)?.let { problems += node to it }
+            FieldSchema.problemsOf(n.kind, n.fields).forEach { problems += node to it }
         }
         return problems
     }
